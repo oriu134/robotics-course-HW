@@ -124,6 +124,10 @@ def test_rgb_message_becomes_pixel_array(listener):
     assert pixels.shape == (1, 1, 3)
     assert pixels.dtype == np.uint8
     assert pixels.tolist() == [[[255, 0, 0]]]
+    mask = listener.latest_red_mask
+    assert mask is not None
+    assert mask.shape == (1, 1)
+    assert mask.tolist() == [[255]]
 
 
 def test_bgr_message_is_converted_to_rgb(listener):
@@ -166,6 +170,7 @@ def test_decode_errors_clear_previous_pixels_and_are_reported(listener, capfd, b
         image_at(1_000_000_000), image_at(1_000_000_000, depth=True)
     )
     assert listener.latest_rgb_pixels is not None
+    assert listener.latest_red_mask is not None
     capfd.readouterr()
     bad = image_at(2_000_000_000)
     if bad_case == 'unknown_encoding':
@@ -179,5 +184,24 @@ def test_decode_errors_clear_previous_pixels_and_are_reported(listener, capfd, b
         bad.data = b'\x00\x00'
     listener.on_synchronized_images(bad, image_at(2_000_000_000, depth=True))
     assert listener.latest_rgb_pixels is None
+    assert listener.latest_red_mask is None
     output = capfd.readouterr()
     assert 'Cannot decode RGB image' in output.err
+
+
+def test_missing_red_region_replaces_previous_mask_and_is_reported(listener, capfd):
+    """Keep a zero mask for a valid non-red image instead of reusing red pixels."""
+    listener.on_synchronized_images(
+        image_at(1_000_000_000), image_at(1_000_000_000, depth=True)
+    )
+    assert listener.latest_red_mask is not None
+    assert np.count_nonzero(listener.latest_red_mask) == 1
+    capfd.readouterr()
+    gray = image_at(2_000_000_000)
+    gray.data = bytes([219, 219, 219])
+    listener.received_pairs = 29
+    listener.on_synchronized_images(gray, image_at(2_000_000_000, depth=True))
+    mask = listener.latest_red_mask
+    assert mask is not None
+    assert np.count_nonzero(mask) == 0
+    assert 'no red region in current image' in capfd.readouterr().err

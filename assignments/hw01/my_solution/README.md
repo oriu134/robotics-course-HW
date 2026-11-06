@@ -114,8 +114,36 @@ Decoding errors are logged and clear the cached pixels rather than retaining an
 older image. RGB pixel information is printed for the first pair and every 30th
 pair. Restart the listener using the commands above after rebuilding.
 
-There is still no marker detection, depth reconstruction, TF transformation or
-arm movement. Step 2A only makes pixel values available for those later stages.
+Step 2A makes pixel values available for the red-color mask described below.
+There is still no reliable marker-center detection, depth reconstruction, TF
+transformation or arm movement.
+
+## Step 2B: highlight candidate red pixels
+
+The synchronized-image callback passes the decoded RGB array to
+`make_red_mask(pixels)`. This pure NumPy helper checks every pixel using the
+starting rule `R >= 150`, `G <= 100`, and `B <= 100`.
+The result is stored in `latest_red_mask`, a two-dimensional `uint8` array:
+
+- `255` (white) means the pixel passes the red-color rule.
+- `0` (black) means it does not.
+
+This is a mask, not a new ROS topic or another RGB image. It has shape
+`(height, width)`, with one flag per pixel instead of three color channels.
+Expect additional periodic output:
+
+```text
+Red mask: shape=(240, 320), red_pixels=...
+```
+
+The count is the number of pixels passing the color rule. A zero count produces
+a warning that the current image has no red region; it does not reuse an earlier
+mask. RGB decoding failures clear the mask too.
+
+These thresholds are a simple, testable starting heuristic for the course camera,
+not a complete object detector. Red noise or other red objects can also pass.
+Selecting the marker region, rejecting unreliable/occluded detections and finding
+its center are later steps. We do not yet publish a target or command movement.
 
 ## Test camera input handling
 
@@ -135,7 +163,9 @@ subscriber or launching Gazebo. They check both arrival orders, timestamps just
 inside/on/outside the tolerance, independent counters, bounded buffering and
 consumption of matched messages. RGB tests verify array shape/type, RGB/BGR channel
 order, padded rows and explicit malformed-message errors with no stale fallback.
-They do not test marker detection or arm motion.
+Red-mask tests cover known colors, exact threshold boundaries, binary shape/type,
+input preservation and invalid arrays. They do not validate reliable marker
+selection or arm motion.
 
 ## Run the example
 

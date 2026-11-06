@@ -1,4 +1,4 @@
-"""Receive camera inputs and inspect RGB pixel arrays without moving the arm."""
+"""Receive camera inputs and highlight candidate red pixels without moving."""
 
 import copy
 
@@ -14,14 +14,31 @@ from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
 
 
+def make_red_mask(rgb_pixels: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    """Highlight pixels passing a simple RGB red-color rule."""
+    if (
+        rgb_pixels.ndim != 3
+        or rgb_pixels.shape[2] != 3
+        or rgb_pixels.size == 0
+        or rgb_pixels.dtype != np.uint8
+    ):
+        raise ValueError('Expected a nonempty height-by-width RGB uint8 array.')
+    red = rgb_pixels[:, :, 0]
+    green = rgb_pixels[:, :, 1]
+    blue = rgb_pixels[:, :, 2]
+    is_red = (red >= 150) & (green <= 100) & (blue <= 100)
+    return is_red.astype(np.uint8) * np.uint8(255)
+
+
 class CameraListener(Node):
-    """Report camera metadata, synchronized pairs and RGB pixel information."""
+    """Report synchronized camera inputs and candidate red-pixel information."""
 
     def __init__(self) -> None:
         """Create camera subscriptions, a synchronizer and an RGB decoder."""
         super().__init__('camera_listener')
         self.bridge = CvBridge()
         self.latest_rgb_pixels: NDArray[np.uint8] | None = None
+        self.latest_red_mask: NDArray[np.uint8] | None = None
         self.received_images = 0
         self.received_depth_images = 0
         self.received_camera_info = 0
@@ -67,7 +84,7 @@ class CameraListener(Node):
         self.log_image(message, 'depth image', self.received_depth_images)
 
     def on_synchronized_images(self, rgb: Image, depth: Image) -> None:
-        """Report timestamp-matched pairs and decode their RGB image."""
+        """Decode matched RGB images and highlight their candidate red pixels."""
         self.received_pairs += 1
         if self.received_pairs == 1 or self.received_pairs % 30 == 0:
             rgb_ns = Time.from_msg(rgb.header.stamp).nanoseconds
@@ -79,7 +96,18 @@ class CameraListener(Node):
                 f'depth stamp={depth.header.stamp.sec}.{depth.header.stamp.nanosec:09d}, '
                 f'delta={gap_seconds:.9f}s'
             )
+        self.latest_red_mask = None
         self.update_rgb_pixels(rgb)
+        if self.latest_rgb_pixels is not None:
+            mask = make_red_mask(self.latest_rgb_pixels)
+            self.latest_red_mask = mask
+            if self.received_pairs == 1 or self.received_pairs % 30 == 0:
+                red_count = int(np.count_nonzero(mask))
+                message = f'Red mask: shape={mask.shape}, red_pixels={red_count}'
+                if red_count == 0:
+                    self.get_logger().warning(message + '; no red region in current image.')
+                else:
+                    self.get_logger().info(message)
 
     def update_rgb_pixels(self, rgb: Image) -> None:
         """Decode the current RGB image and report one sample pixel."""
