@@ -41,6 +41,46 @@ class MarkerDetection:
     mask: NDArray[np.uint8]
 
 
+def _bounding_box_rejection(
+    stats_row: NDArray[np.int32], image_height: int, image_width: int
+) -> str | None:
+    """Return a bounding-box rejection reason, or None when its checks pass."""
+    x = int(stats_row[cv2.CC_STAT_LEFT])
+    y = int(stats_row[cv2.CC_STAT_TOP])
+    width = int(stats_row[cv2.CC_STAT_WIDTH])
+    height = int(stats_row[cv2.CC_STAT_HEIGHT])
+    area = int(stats_row[cv2.CC_STAT_AREA])
+    # A border-touching patch may extend outside the image and bias its center.
+    if x == 0 or y == 0 or x + width == image_width or y + height == image_height:
+        return 'Red region touches the image border.'
+    # A round marker should have a roughly equally wide and tall bounding box.
+    if min(width, height) / max(width, height) < 0.75:
+        return 'Red region is elongated (possible occlusion).'
+    # A disk leaves empty box corners; very sparse or fully filled boxes differ.
+    fill = area / (width * height)
+    if not 0.55 <= fill <= 0.90:
+        return 'Red region does not have a filled round shape.'
+    return None
+
+
+def _outline_rejection(region_mask: NDArray[np.uint8]) -> str | None:
+    """Return an outline rejection reason, or None when roundness checks pass."""
+    contours, _ = cv2.findContours(
+        region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if len(contours) != 1:
+        return 'Red region outline is unreliable.'
+    perimeter = cv2.arcLength(contours[0], True)
+    if perimeter <= 0:
+        return 'Red region outline is degenerate.'
+    # Circularity uses contour polygon area, not the white-pixel count above.
+    # An ideal circle scores 1; the lower bound tolerates pixelated outlines.
+    circularity = 4.0 * math.pi * cv2.contourArea(contours[0]) / perimeter**2
+    if circularity < 0.70:
+        return 'Red region is not round enough (possible occlusion).'
+    return None
+
+
 def detect_marker(mask: NDArray[np.uint8]) -> tuple[MarkerDetection | None, str]:
     """
     Select one plausible round marker from an already computed red mask.
@@ -92,6 +132,7 @@ def detect_marker(mask: NDArray[np.uint8]) -> tuple[MarkerDetection | None, str]
         raise ValueError('Mask values must be 0 or 255.')
     # Label 0 is background; other labels identify separate connected patches.
     # Eight-connectivity also groups pixels that touch diagonally.
+    # Btw its like finding islands leetcode 200. Number of Islands(very similiar)
     count, labels, stats, centers = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if count == 1:
         return None, 'No red region.'
@@ -106,39 +147,17 @@ def detect_marker(mask: NDArray[np.uint8]) -> tuple[MarkerDetection | None, str]
     if len(regions) != 1:
         return None, 'Multiple sizeable red regions; marker is ambiguous.'
     region = regions[0]
-    x = int(stats[region, cv2.CC_STAT_LEFT])
-    y = int(stats[region, cv2.CC_STAT_TOP])
-    width = int(stats[region, cv2.CC_STAT_WIDTH])
-    height = int(stats[region, cv2.CC_STAT_HEIGHT])
-    area = int(stats[region, cv2.CC_STAT_AREA])
     image_height, image_width = mask.shape
-    # A border-touching patch may extend outside the image and bias its center.
-    if x == 0 or y == 0 or x + width == image_width or y + height == image_height:
-        return None, 'Red region touches the image border.'
-    # A round marker should have a roughly equally wide and tall bounding box.
-    if min(width, height) / max(width, height) < 0.75:
-        return None, 'Red region is elongated (possible occlusion).'
-    # A disk leaves empty box corners; very sparse or fully filled boxes differ.
-    fill = area / (width * height)
-    if not 0.55 <= fill <= 0.90:
-        return None, 'Red region does not have a filled round shape.'
+    reason = _bounding_box_rejection(stats[region], image_height, image_width)
+    if reason is not None:
+        return None, reason
     # Exclude every other component so later depth sampling cannot include noise.
     region_mask: NDArray[np.uint8] = (
         (labels == region).astype(np.uint8) * np.uint8(255)
     )
-    contours, _ = cv2.findContours(
-        region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-    if len(contours) != 1:
-        return None, 'Red region outline is unreliable.'
-    perimeter = cv2.arcLength(contours[0], True)
-    if perimeter <= 0:
-        return None, 'Red region outline is degenerate.'
-    # Circularity uses contour polygon area, not the white-pixel count above.
-    # An ideal circle scores 1; the lower bound tolerates pixelated outlines.
-    circularity = 4.0 * math.pi * cv2.contourArea(contours[0]) / perimeter**2
-    if circularity < 0.70:
-        return None, 'Red region is not round enough (possible occlusion).'
+    reason = _outline_rejection(region_mask)
+    if reason is not None:
+        return None, reason
     # OpenCV already computed each label's mean (x, y): column first, row second.
     # Keep subpixel precision for later reconstruction rather than rounding here.
     u, v = centers[region]

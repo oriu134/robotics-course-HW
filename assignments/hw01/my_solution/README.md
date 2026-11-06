@@ -166,6 +166,16 @@ background and is never a candidate.
 This uniqueness check happens before the shape tests below. The helper does not
 check all sizeable shapes and then pick the most circular candidate.
 
+The main detector delegates geometry validation to two small helpers:
+
+- `_bounding_box_rejection` checks image-edge contact, box proportions and fill.
+- `_outline_rejection` checks the selected region's contour and circularity.
+
+Each returns a descriptive rejection string, or `None` if its checks pass.
+The main detector turns a rejection string into `(None, reason)`; otherwise it
+continues to calculate the center. These helpers do not select candidates or
+compute pixel coordinates.
+
 The remaining region must not touch the image border. Its shorter/longer bounding
 box side ratio must be at least 0.75, its pixel area must occupy between 0.55 and
 0.90 of that box, and its contour circularity must be at least 0.70. These
