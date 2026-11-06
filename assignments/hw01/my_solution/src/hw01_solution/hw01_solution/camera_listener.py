@@ -42,20 +42,67 @@ class MarkerDetection:
 
 
 def detect_marker(mask: NDArray[np.uint8]) -> tuple[MarkerDetection | None, str]:
-    """Select one sizeable, approximately round red region or explain rejection."""
+    """
+    Select one plausible round marker from an already computed red mask.
+
+    Color filtering has already happened in make_red_mask. This function groups
+    its white pixels, discards small specks, and checks the remaining region's
+    geometry. It does not use depth, preset coordinates, or robot coordinates.
+
+    Parameters
+    ----------
+    mask : numpy.ndarray
+        A nonempty (height, width) uint8 array. Values are 255 for candidate
+        red pixels and 0 for background. The input array is not modified.
+
+    Returns
+    -------
+    detection : MarkerDetection or None
+        On acceptance, contains the floating-point pixel center (u, v),
+        meaning (column, row), and a mask of only the selected component.
+        None means a valid mask contains no unique, reliable-looking marker.
+    reason : str
+        Explains acceptance or what was missing or unreliable. On detection
+        failure, the caller reports this reason and clears its previous marker.
+
+    Raises
+    ------
+    ValueError
+        If the input is not a nonempty two-dimensional uint8 mask containing
+        only 0 and 255. Malformed input is different from an ordinary missing
+        marker in a valid mask.
+
+    Notes
+    -----
+    The course camera sees one approximately round marker from above. The
+    size and shape thresholds are conservative heuristics for that setup,
+    not proof that every accepted red object is the intended marker.
+    Multiple sizeable components are rejected BEFORE shape checking; this
+    function does not test all their shapes and then choose a winner.
+
+    For example, foreground labels 1 and 2 with areas 91 and 3 pixels leave
+    regions=[1] after the size filter. Label 1 must still pass the shape
+    checks. Areas 91 and 80 leave regions=[1, 2], so the observation is
+    rejected as ambiguous rather than selecting the larger component.
+
+    """
     if mask.ndim != 2 or mask.size == 0 or mask.dtype != np.uint8:
         raise ValueError('Expected a nonempty two-dimensional uint8 mask.')
     if np.any((mask != 0) & (mask != 255)):
         raise ValueError('Mask values must be 0 or 255.')
+    # Label 0 is background; other labels identify separate connected patches.
+    # Eight-connectivity also groups pixels that touch diagonally.
     count, labels, stats, centers = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if count == 1:
         return None, 'No red region.'
+    # Keep component LABEL IDs, not pixels or coordinates. Areas count pixels.
     regions = [
         index for index in range(1, count)
         if stats[index, cv2.CC_STAT_AREA] >= 20
     ]
     if not regions:
         return None, 'Red regions are too small.'
+    # A larger patch can be a distractor, so size alone cannot resolve ambiguity.
     if len(regions) != 1:
         return None, 'Multiple sizeable red regions; marker is ambiguous.'
     region = regions[0]
@@ -65,13 +112,17 @@ def detect_marker(mask: NDArray[np.uint8]) -> tuple[MarkerDetection | None, str]
     height = int(stats[region, cv2.CC_STAT_HEIGHT])
     area = int(stats[region, cv2.CC_STAT_AREA])
     image_height, image_width = mask.shape
+    # A border-touching patch may extend outside the image and bias its center.
     if x == 0 or y == 0 or x + width == image_width or y + height == image_height:
         return None, 'Red region touches the image border.'
+    # A round marker should have a roughly equally wide and tall bounding box.
     if min(width, height) / max(width, height) < 0.75:
         return None, 'Red region is elongated (possible occlusion).'
+    # A disk leaves empty box corners; very sparse or fully filled boxes differ.
     fill = area / (width * height)
     if not 0.55 <= fill <= 0.90:
         return None, 'Red region does not have a filled round shape.'
+    # Exclude every other component so later depth sampling cannot include noise.
     region_mask: NDArray[np.uint8] = (
         (labels == region).astype(np.uint8) * np.uint8(255)
     )
@@ -83,9 +134,13 @@ def detect_marker(mask: NDArray[np.uint8]) -> tuple[MarkerDetection | None, str]
     perimeter = cv2.arcLength(contours[0], True)
     if perimeter <= 0:
         return None, 'Red region outline is degenerate.'
+    # Circularity uses contour polygon area, not the white-pixel count above.
+    # An ideal circle scores 1; the lower bound tolerates pixelated outlines.
     circularity = 4.0 * math.pi * cv2.contourArea(contours[0]) / perimeter**2
     if circularity < 0.70:
         return None, 'Red region is not round enough (possible occlusion).'
+    # OpenCV already computed each label's mean (x, y): column first, row second.
+    # Keep subpixel precision for later reconstruction rather than rounding here.
     u, v = centers[region]
     return MarkerDetection((float(u), float(v)), region_mask), 'Marker region accepted.'
 

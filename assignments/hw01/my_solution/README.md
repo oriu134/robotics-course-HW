@@ -152,6 +152,20 @@ pixels. Regions smaller than 20 pixels are ignored as noise. Exactly one sizeabl
 region must remain; multiple candidates are rejected instead of choosing the
 largest or guessing.
 
+The detailed docstring in
+[detect_marker](src/hw01_solution/hw01_solution/camera_listener.py) explains the
+input, outputs and failure cases. In particular, `regions` is a list of integer
+component IDs, not a list of images or pixel coordinates. OpenCV label 0 is
+background and is never a candidate.
+
+| Foreground component areas | IDs left after size filtering | Next decision |
+| --- | --- | --- |
+| Label 1: 91 pixels; label 2: 3 pixels | `[1]` | Check label 1's shape before accepting it |
+| Label 1: 91 pixels; label 2: 80 pixels | `[1, 2]` | Reject as ambiguous; do not choose the larger one |
+
+This uniqueness check happens before the shape tests below. The helper does not
+check all sizeable shapes and then pick the most circular candidate.
+
 The remaining region must not touch the image border. Its shorter/longer bounding
 box side ratio must be at least 0.75, its pixel area must occupy between 0.55 and
 0.90 of that box, and its contour circularity must be at least 0.70. These
