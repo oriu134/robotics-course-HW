@@ -21,7 +21,7 @@ Each stream logs its first message and every 30th message afterward.
 RGB and depth share a small metadata-logging helper. Camera info provides the
 intrinsic matrix `k`; entries 0/4 are `fx`/`fy` and entries 2/5 are `cx`/`cy`.
 Depth uses `32FC1`: one 32-bit floating-point depth value per pixel, in metres.
-The listener only reports metadata; it does not inspect or validate depth pixels.
+Depth handling only reports metadata; it does not inspect or validate depth pixels.
 Individual-message callbacks still run independently. RGB/depth subscriptions
 now use `message_filters.Subscriber`, a wrapper around a ROS subscription.
 `ApproximateTimeSynchronizer` buffers up to ten messages per image stream and
@@ -34,7 +34,8 @@ comparison: timestamp differences **less than 0.05 simulated seconds** are paire
 exactly 0.05 seconds or greater are not paired. This stays within the assignment's
 50 ms limit without changing the ROS helper. Unmatched messages wait for a suitable
 counterpart and the oldest timestamps are discarded when a buffer fills.
-The new callback only counts pairs and reports timestamps and their difference.
+The callback counts pairs and reports timestamps and their difference.
+Step 2A, described below, now also converts the matched RGB image into pixels.
 Depth-pixel validation, stale-data handling, marker detection, reconstruction,
 transforms and motion are not implemented yet.
 
@@ -87,7 +88,36 @@ two images have identical capture timestamps; a small nonzero difference is
 accepted only below the synchronization tolerance.
 Stop the listener with Ctrl+C.
 
-## Test the timestamp matching
+## Step 2A: inspect RGB pixels
+
+The synchronized-image callback now calls `update_rgb_pixels(rgb)`.
+`CvBridge.imgmsg_to_cv2(image, desired_encoding='rgb8')` converts the ROS message
+into a NumPy array with channel order red, green, blue, including when the input
+encoding is `bgr8`. The latest successful result is stored in `latest_rgb_pixels`.
+
+For the course camera, expect additional output like:
+
+```text
+RGB array: shape=(240, 320, 3), dtype=uint8, center[row=120, col=160]=[R, G, B]
+```
+
+The three entries of `shape` are height, width and color channels.
+`uint8` holds whole-number channel values from 0 to 255.
+Indexing uses `pixels[row, column]`, so `pixels[120, 160]` returns one RGB triplet.
+The displayed center pixel is only an inspection example, not a detected marker
+or a commanded target. Its values vary with the scene.
+
+The converter checks dimensions, row stride and data length before decoding.
+This installed CvBridge version mishandles non-pixel-aligned row padding, so padded
+rows are packed on a copy before conversion; incoming messages are not modified.
+Decoding errors are logged and clear the cached pixels rather than retaining an
+older image. RGB pixel information is printed for the first pair and every 30th
+pair. Restart the listener using the commands above after rebuilding.
+
+There is still no marker detection, depth reconstruction, TF transformation or
+arm movement. Step 2A only makes pixel values available for those later stages.
+
+## Test camera input handling
 
 After building, run from the repository root:
 
@@ -100,10 +130,12 @@ cd ../../..
 ```
 
 Use an unused ROS domain for tests; 93 is the example above.
-The synchronization tests inject synthetic messages without spinning a camera
+The tests inject synthetic messages without spinning a camera
 subscriber or launching Gazebo. They check both arrival orders, timestamps just
 inside/on/outside the tolerance, independent counters, bounded buffering and
-consumption of matched messages. They do not test perception or arm motion.
+consumption of matched messages. RGB tests verify array shape/type, RGB/BGR channel
+order, padded rows and explicit malformed-message errors with no stale fallback.
+They do not test marker detection or arm motion.
 
 ## Run the example
 

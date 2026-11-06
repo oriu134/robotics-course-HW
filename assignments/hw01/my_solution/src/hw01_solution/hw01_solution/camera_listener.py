@@ -1,6 +1,11 @@
-"""Receive and synchronize HW1 camera inputs without processing or moving."""
+"""Receive camera inputs and inspect RGB pixel arrays without moving the arm."""
 
+import copy
+
+from cv_bridge import CvBridge, CvBridgeError
 from message_filters import ApproximateTimeSynchronizer, Subscriber
+import numpy as np
+from numpy.typing import NDArray
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -10,11 +15,13 @@ from sensor_msgs.msg import CameraInfo, Image
 
 
 class CameraListener(Node):
-    """Report camera metadata and timestamp-matched RGB/depth pairs."""
+    """Report camera metadata, synchronized pairs and RGB pixel information."""
 
     def __init__(self) -> None:
-        """Create RGB, depth and calibration subscriptions."""
+        """Create camera subscriptions, a synchronizer and an RGB decoder."""
         super().__init__('camera_listener')
+        self.bridge = CvBridge()
+        self.latest_rgb_pixels: NDArray[np.uint8] | None = None
         self.received_images = 0
         self.received_depth_images = 0
         self.received_camera_info = 0
@@ -60,7 +67,7 @@ class CameraListener(Node):
         self.log_image(message, 'depth image', self.received_depth_images)
 
     def on_synchronized_images(self, rgb: Image, depth: Image) -> None:
-        """Report pairs whose capture timestamps satisfy the timing tolerance."""
+        """Report timestamp-matched pairs and decode their RGB image."""
         self.received_pairs += 1
         if self.received_pairs == 1 or self.received_pairs % 30 == 0:
             rgb_ns = Time.from_msg(rgb.header.stamp).nanoseconds
@@ -71,6 +78,47 @@ class CameraListener(Node):
                 f'RGB stamp={rgb.header.stamp.sec}.{rgb.header.stamp.nanosec:09d}, '
                 f'depth stamp={depth.header.stamp.sec}.{depth.header.stamp.nanosec:09d}, '
                 f'delta={gap_seconds:.9f}s'
+            )
+        self.update_rgb_pixels(rgb)
+
+    def update_rgb_pixels(self, rgb: Image) -> None:
+        """Decode the current RGB image and report one sample pixel."""
+        self.latest_rgb_pixels = None
+        try:
+            if rgb.width == 0 or rgb.height == 0:
+                raise ValueError('Image dimensions must be positive.')
+            source_dtype, channels = self.bridge.encoding_to_dtype_with_channels(
+                rgb.encoding
+            )
+            row_bytes = rgb.width * np.dtype(source_dtype).itemsize * channels
+            if rgb.step < row_bytes:
+                raise ValueError('Row stride is smaller than the encoded pixel row.')
+            if len(rgb.data) != rgb.height * rgb.step:
+                raise ValueError('Image data length does not match height and row stride.')
+            image = rgb
+            if rgb.step > row_bytes:
+                # This CvBridge version misreads padding that is not a whole pixel.
+                image = copy.copy(rgb)
+                rows = np.frombuffer(rgb.data, dtype=np.uint8).reshape(rgb.height, rgb.step)
+                image.data = rows[:, :row_bytes].tobytes()
+                image.step = row_bytes
+            pixels: NDArray[np.uint8] = self.bridge.imgmsg_to_cv2(
+                image, desired_encoding='rgb8'
+            )
+            if pixels.shape != (rgb.height, rgb.width, 3) or pixels.dtype != np.uint8:
+                raise ValueError('Decoded image is not a height-by-width RGB uint8 array.')
+        except (CvBridgeError, ValueError) as error:
+            self.get_logger().error(
+                f'Cannot decode RGB image ({rgb.encoding}, '
+                f'{rgb.width}x{rgb.height}): {error}'
+            )
+            return
+        self.latest_rgb_pixels = pixels
+        if self.received_pairs == 1 or self.received_pairs % 30 == 0:
+            row, column = rgb.height // 2, rgb.width // 2
+            self.get_logger().info(
+                f'RGB array: shape={pixels.shape}, dtype={pixels.dtype}, '
+                f'center[row={row}, col={column}]={pixels[row, column].tolist()}'
             )
 
     def log_image(self, message: Image, label: str, count: int) -> None:

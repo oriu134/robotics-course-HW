@@ -1,8 +1,9 @@
-"""Check timestamp pairing without Gazebo, image processing or arm motion."""
+"""Check timestamp pairing and RGB decoding without Gazebo or arm motion."""
 
 import struct
 
 from hw01_solution.camera_listener import CameraListener
+import numpy as np
 import pytest
 import rclpy
 from sensor_msgs.msg import Image
@@ -112,3 +113,71 @@ def test_matched_rgb_is_not_reused(listener):
     assert listener.received_pairs == 1
     listener.depth_subscription.signalMessage(image_at(1_000_000_000, depth=True))
     assert listener.received_pairs == 1
+
+
+def test_rgb_message_becomes_pixel_array(listener):
+    """Decode a matched RGB message with the correct dimensions and channels."""
+    listener.image_subscription.signalMessage(image_at(1_000_000_000))
+    listener.depth_subscription.signalMessage(image_at(1_000_000_000, depth=True))
+    pixels = listener.latest_rgb_pixels
+    assert pixels is not None
+    assert pixels.shape == (1, 1, 3)
+    assert pixels.dtype == np.uint8
+    assert pixels.tolist() == [[[255, 0, 0]]]
+
+
+def test_bgr_message_is_converted_to_rgb(listener):
+    """Honor the incoming encoding rather than confusing red and blue."""
+    rgb = image_at(1_000_000_000)
+    rgb.encoding = 'bgr8'
+    rgb.data = bytes([10, 20, 30])
+    listener.on_synchronized_images(rgb, image_at(1_000_000_000, depth=True))
+    pixels = listener.latest_rgb_pixels
+    assert pixels is not None
+    assert pixels.dtype == np.uint8
+    assert pixels.tolist() == [[[30, 20, 10]]]
+
+
+def test_padded_rgb_rows_are_decoded_without_mutating_message(listener):
+    """Remove row padding on a copy so each row retains its actual pixels."""
+    rgb = image_at(1_000_000_000)
+    rgb.height = 2
+    rgb.step = 4
+    payload = bytes([10, 20, 30, 99, 40, 50, 60, 88])
+    rgb.data = payload
+    depth = image_at(1_000_000_000, depth=True)
+    depth.height = 2
+    depth.data = struct.pack('<ff', 1.0, 1.0)
+    listener.on_synchronized_images(rgb, depth)
+    pixels = listener.latest_rgb_pixels
+    assert pixels is not None
+    assert pixels.shape == (2, 1, 3)
+    assert pixels.tolist() == [[[10, 20, 30]], [[40, 50, 60]]]
+    assert rgb.step == 4
+    assert bytes(rgb.data) == payload
+
+
+@pytest.mark.parametrize('bad_case', [
+    'unknown_encoding', 'short_payload', 'empty_image', 'short_row_stride',
+])
+def test_decode_errors_clear_previous_pixels_and_are_reported(listener, capfd, bad_case):
+    """Never retain an earlier image as a success-shaped decoding fallback."""
+    listener.on_synchronized_images(
+        image_at(1_000_000_000), image_at(1_000_000_000, depth=True)
+    )
+    assert listener.latest_rgb_pixels is not None
+    capfd.readouterr()
+    bad = image_at(2_000_000_000)
+    if bad_case == 'unknown_encoding':
+        bad.encoding = 'unsupported'
+    elif bad_case == 'short_payload':
+        bad.data = b'\x00'
+    elif bad_case == 'empty_image':
+        bad.width = 0
+    else:
+        bad.step = 2
+        bad.data = b'\x00\x00'
+    listener.on_synchronized_images(bad, image_at(2_000_000_000, depth=True))
+    assert listener.latest_rgb_pixels is None
+    output = capfd.readouterr()
+    assert 'Cannot decode RGB image' in output.err
