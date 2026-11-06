@@ -255,3 +255,91 @@ def test_old_marker_is_cleared_and_failure_is_reported(listener, capfd, failure)
         assert 'Cannot decode RGB image' in output
     else:
         assert 'Marker not detected' in output
+
+
+def test_synchronized_images_store_depth_array_and_marker_depth(listener):
+    """Decode the aligned float image and measure only the accepted marker."""
+    rgb, depth = marker_images(1_000_000_000)
+    listener.image_subscription.signalMessage(rgb)
+    listener.depth_subscription.signalMessage(depth)
+    pixels = listener.latest_depth_pixels
+    assert pixels is not None
+    assert pixels.shape == (40, 60)
+    assert pixels.dtype == np.float32
+    assert listener.latest_marker_depth == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize('failure', ['frame', 'dimensions', 'encoding', 'payload'])
+def test_bad_depth_messages_clear_previous_depth_and_are_reported(listener, capfd, failure):
+    """Do not retain a measured distance after a malformed or unaligned frame."""
+    rgb, depth = marker_images(1_000_000_000)
+    listener.on_synchronized_images(rgb, depth)
+    assert listener.latest_marker_depth is not None
+    capfd.readouterr()
+    rgb, depth = marker_images(2_000_000_000)
+    if failure == 'frame':
+        depth.header.frame_id = 'different_optical_frame'
+    elif failure == 'dimensions':
+        depth.width = 61
+    elif failure == 'encoding':
+        depth.encoding = '16UC1'
+    else:
+        depth.data = b'\x00'
+    listener.on_synchronized_images(rgb, depth)
+    assert listener.latest_depth_pixels is None
+    assert listener.latest_marker_depth is None
+    assert 'Cannot decode aligned depth image' in capfd.readouterr().err
+
+
+@pytest.mark.parametrize('failure', [
+    'rgb_error', 'missing_marker', 'invalid_samples', 'too_few_samples',
+])
+def test_unusable_observations_do_not_reuse_marker_depth(listener, failure):
+    """Clear the scalar depth on missing RGB, missing markers or invalid ranges."""
+    rgb, depth = marker_images(1_000_000_000)
+    listener.on_synchronized_images(rgb, depth)
+    assert listener.latest_marker_depth == pytest.approx(1.0)
+    rgb, depth = marker_images(2_000_000_000)
+    if failure == 'rgb_error':
+        rgb.data = b'\x00'
+    elif failure == 'missing_marker':
+        rgb.data = np.full((40, 60, 3), 219, dtype=np.uint8).tobytes()
+    else:
+        pixels = np.full((40, 60), np.nan, dtype=np.float32)
+        if failure == 'too_few_samples':
+            pixels[20, 30] = 0.94
+        depth.data = pixels.tobytes()
+    listener.on_synchronized_images(rgb, depth)
+    assert listener.latest_marker_depth is None
+
+
+def test_padded_depth_rows_are_decoded_without_mutating_message(listener):
+    """Use the shared image-storage helper for float depth row padding."""
+    rgb = image_at(1_000_000_000)
+    rgb.height = 2
+    rgb.data = bytes([255, 0, 0, 255, 0, 0])
+    depth = image_at(1_000_000_000, depth=True)
+    depth.height = 2
+    depth.step = 5
+    payload = struct.pack('<f', 0.94) + b'\x63' + struct.pack('<f', 0.96) + b'\x58'
+    depth.data = payload
+    listener.update_depth_pixels(depth, rgb)
+    pixels = listener.latest_depth_pixels
+    assert pixels is not None
+    assert pixels.shape == (2, 1)
+    assert pixels[:, 0] == pytest.approx([0.94, 0.96])
+    assert depth.step == 5
+    assert bytes(depth.data) == payload
+
+
+def test_big_endian_depth_is_decoded_as_native_float32(listener):
+    """Honor byte-order metadata instead of interpreting float bytes as native."""
+    rgb = image_at(1_000_000_000)
+    depth = image_at(1_000_000_000, depth=True)
+    depth.is_bigendian = 1
+    depth.data = np.array([[0.94]], dtype='>f4').tobytes()
+    listener.update_depth_pixels(depth, rgb)
+    pixels = listener.latest_depth_pixels
+    assert pixels is not None
+    assert pixels.dtype == np.float32
+    assert pixels[0, 0] == pytest.approx(0.94)

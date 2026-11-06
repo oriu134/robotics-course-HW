@@ -21,7 +21,7 @@ Each stream logs its first message and every 30th message afterward.
 RGB and depth share a small metadata-logging helper. Camera info provides the
 intrinsic matrix `k`; entries 0/4 are `fx`/`fy` and entries 2/5 are `cx`/`cy`.
 Depth uses `32FC1`: one 32-bit floating-point depth value per pixel, in metres.
-Depth handling only reports metadata; it does not inspect or validate depth pixels.
+Step 3A below now decodes and validates depth samples inside the selected marker.
 Individual-message callbacks still run independently. RGB/depth subscriptions
 now use `message_filters.Subscriber`, a wrapper around a ROS subscription.
 `ApproximateTimeSynchronizer` buffers up to ten messages per image stream and
@@ -207,6 +207,42 @@ This is still only an image-space observation. No 3D point, TF transformation,
 target publication or arm movement is implemented. Timestamp/wall-clock freshness
 guards for a stopped stream also remain necessary before commanding motion.
 
+## Step 3A: measure depth inside the selected marker
+
+`update_depth_pixels(depth, rgb)` checks the `32FC1` encoding, aligned dimensions
+and matching nonempty optical-frame headers. CvBridge then decodes the message
+with `desired_encoding='passthrough'` into a `(height, width)` float32 array.
+Both RGB and depth use `_packed_image` for shared storage validation and safe
+row-padding removal on a copy.
+
+`measure_marker_depth(depth_pixels, detection.mask)` selects only the accepted
+marker component, excluding background and small red-noise regions. Samples must
+be finite and between 0.05 and 3.0 metres, matching the camera's clipping range.
+These limits only validate sensor measurements; they do not specify or assume
+the marker's position.
+
+At least half of the selected pixels must have usable depth. The method then
+returns their median, reducing the influence of isolated outliers. The median and
+50-percent requirement are our depth-selection choices, not prescribed helper
+functions or thresholds from the handout. The report should explain them.
+
+Expected additional output:
+
+```text
+Depth array: shape=(240, 320), dtype=float32, unit=metres
+Marker depth: 0.940000m
+```
+
+The numerical depth can vary. It is distance along the camera optical Z axis,
+not a Euclidean camera-to-marker range and not the marker's robot-frame height.
+The latest current estimate is stored in `latest_marker_depth`.
+Missing/unusable samples report a reason; malformed depth images report an error.
+A failed new observation clears the previous depth rather than reusing it.
+
+There is still no three-dimensional point, TF transformation, target publication
+or arm movement. Step 3B will combine this measured depth with the pixel center
+and the actual camera intrinsics.
+
 ## Test camera input handling
 
 After building, run from the repository root:
@@ -230,6 +266,9 @@ input preservation and invalid arrays. They do not validate reliable marker
 selection on arbitrary real scenes or arm motion. Marker-region tests cover
 column/row order, subpixel centers, noise exclusion, the area boundary, ambiguity,
 clipping, obvious occlusion, non-marker shapes and clearing old detections.
+Depth tests cover selected-region sampling, median/outliers, invalid values,
+clipping-range and validity-fraction boundaries, alignment, byte order, padded
+rows and clearing old measurements.
 
 ## Run the example
 

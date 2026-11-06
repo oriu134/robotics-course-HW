@@ -1,4 +1,4 @@
-"""Receive camera inputs and locate a round red marker without moving."""
+"""Locate a red marker and measure its camera-axis depth without moving."""
 
 import copy
 from dataclasses import dataclass
@@ -15,6 +15,11 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
+
+
+# Sensor clipping limits filter measurements; they are not a marker position.
+MIN_CAMERA_DEPTH_METRES = 0.05
+MAX_CAMERA_DEPTH_METRES = 3.0
 
 
 def make_red_mask(rgb_pixels: NDArray[np.uint8]) -> NDArray[np.uint8]:
@@ -164,17 +169,95 @@ def detect_marker(mask: NDArray[np.uint8]) -> tuple[MarkerDetection | None, str]
     return MarkerDetection((float(u), float(v)), region_mask), 'Marker region accepted.'
 
 
+def _packed_image(image: Image, bridge: CvBridge) -> Image:
+    """Validate image storage and remove row padding on a copy when needed."""
+    if image.width == 0 or image.height == 0:
+        raise ValueError('Image dimensions must be positive.')
+    source_dtype, channels = bridge.encoding_to_dtype_with_channels(image.encoding)
+    row_bytes = image.width * np.dtype(source_dtype).itemsize * channels
+    if image.step < row_bytes:
+        raise ValueError('Row stride is smaller than the encoded pixel row.')
+    if len(image.data) != image.height * image.step:
+        raise ValueError('Image data length does not match height and row stride.')
+    if image.step == row_bytes:
+        return image
+    # This CvBridge version misreads padding that is not a whole pixel.
+    packed = copy.copy(image)
+    rows = np.frombuffer(image.data, dtype=np.uint8).reshape(image.height, image.step)
+    packed.data = rows[:, :row_bytes].tobytes()
+    packed.step = row_bytes
+    return packed
+
+
+def measure_marker_depth(
+    depth_pixels: NDArray[np.float32], marker_mask: NDArray[np.uint8]
+) -> tuple[float | None, str]:
+    """
+    Estimate marker optical-Z depth from valid pixels in its selected region.
+
+    Background and small red-noise regions are excluded by marker_mask.
+    Nonfinite samples and values outside the camera's clipping range are ignored.
+    At least half of the region must have valid depth; the median then limits the
+    influence of isolated outliers. This is a depth-selection heuristic, not a
+    reconstruction of a three-dimensional position.
+
+    Parameters
+    ----------
+    depth_pixels : numpy.ndarray
+        Nonempty, two-dimensional float32 depth values in metres.
+    marker_mask : numpy.ndarray
+        Same-sized uint8 mask with 255 for selected marker pixels and 0 elsewhere.
+
+    Returns
+    -------
+    distance : float or None
+        Median usable depth along the camera optical Z axis, or None when there
+        are no valid samples or less than half the selected region is usable.
+    reason : str
+        Explanation of acceptance or missing/unreliable depth.
+
+    Raises
+    ------
+    ValueError
+        If the arrays have invalid types, shapes or an empty marker selection.
+
+    """
+    if depth_pixels.ndim != 2 or depth_pixels.size == 0 or depth_pixels.dtype != np.float32:
+        raise ValueError('Expected a nonempty two-dimensional float32 depth array.')
+    if marker_mask.shape != depth_pixels.shape or marker_mask.dtype != np.uint8:
+        raise ValueError('Marker mask must be a same-sized uint8 array.')
+    if np.any((marker_mask != 0) & (marker_mask != 255)):
+        raise ValueError('Marker mask values must be 0 or 255.')
+    samples = depth_pixels[marker_mask != 0]
+    if samples.size == 0:
+        raise ValueError('Selected marker mask must contain pixels.')
+    valid = (
+        np.isfinite(samples)
+        & (samples >= MIN_CAMERA_DEPTH_METRES)
+        & (samples <= MAX_CAMERA_DEPTH_METRES)
+    )
+    valid_count = int(np.count_nonzero(valid))
+    if valid_count == 0:
+        return None, 'No valid marker depth samples.'
+    if valid_count * 2 < samples.size:
+        return None, 'Less than half of the marker has valid depth.'
+    return float(np.median(samples[valid])), 'Marker depth accepted.'
+
+
 class CameraListener(Node):
-    """Report synchronized camera inputs and accepted marker pixel centers."""
+    """Report synchronized marker pixel centers and camera-axis depth."""
 
     def __init__(self) -> None:
         """Create camera subscriptions, a synchronizer and an RGB decoder."""
         super().__init__('camera_listener')
         self.bridge = CvBridge()
         self.latest_rgb_pixels: NDArray[np.uint8] | None = None
+        self.latest_depth_pixels: NDArray[np.float32] | None = None
         self.latest_red_mask: NDArray[np.uint8] | None = None
         self.latest_marker: MarkerDetection | None = None
+        self.latest_marker_depth: float | None = None
         self._marker_reason: str | None = None
+        self._depth_reason: str | None = None
         self.received_images = 0
         self.received_depth_images = 0
         self.received_camera_info = 0
@@ -220,7 +303,7 @@ class CameraListener(Node):
         self.log_image(message, 'depth image', self.received_depth_images)
 
     def on_synchronized_images(self, rgb: Image, depth: Image) -> None:
-        """Decode matched RGB images, form a red mask and locate the marker."""
+        """Locate a marker in matched images and estimate its optical-Z depth."""
         self.received_pairs += 1
         if self.received_pairs == 1 or self.received_pairs % 30 == 0:
             rgb_ns = Time.from_msg(rgb.header.stamp).nanoseconds
@@ -234,8 +317,11 @@ class CameraListener(Node):
             )
         self.latest_red_mask = None
         self.latest_marker = None
+        self.latest_depth_pixels = None
+        self.latest_marker_depth = None
         self.update_rgb_pixels(rgb)
         if self.latest_rgb_pixels is not None:
+            self.update_depth_pixels(depth, rgb)
             mask = make_red_mask(self.latest_rgb_pixels)
             self.latest_red_mask = mask
             if self.received_pairs == 1 or self.received_pairs % 30 == 0:
@@ -261,30 +347,19 @@ class CameraListener(Node):
                         f'Marker pixel: u={u:.2f}, v={v:.2f}, region_pixels={area}'
                     )
             self._marker_reason = reason
+            if detection is not None:
+                self.update_marker_depth(detection.mask)
+            else:
+                self._depth_reason = 'Marker unavailable.'
         else:
             self._marker_reason = 'RGB decoding failed.'
+            self._depth_reason = 'RGB decoding failed.'
 
     def update_rgb_pixels(self, rgb: Image) -> None:
         """Decode the current RGB image and report one sample pixel."""
         self.latest_rgb_pixels = None
         try:
-            if rgb.width == 0 or rgb.height == 0:
-                raise ValueError('Image dimensions must be positive.')
-            source_dtype, channels = self.bridge.encoding_to_dtype_with_channels(
-                rgb.encoding
-            )
-            row_bytes = rgb.width * np.dtype(source_dtype).itemsize * channels
-            if rgb.step < row_bytes:
-                raise ValueError('Row stride is smaller than the encoded pixel row.')
-            if len(rgb.data) != rgb.height * rgb.step:
-                raise ValueError('Image data length does not match height and row stride.')
-            image = rgb
-            if rgb.step > row_bytes:
-                # This CvBridge version misreads padding that is not a whole pixel.
-                image = copy.copy(rgb)
-                rows = np.frombuffer(rgb.data, dtype=np.uint8).reshape(rgb.height, rgb.step)
-                image.data = rows[:, :row_bytes].tobytes()
-                image.step = row_bytes
+            image = _packed_image(rgb, self.bridge)
             pixels: NDArray[np.uint8] = self.bridge.imgmsg_to_cv2(
                 image, desired_encoding='rgb8'
             )
@@ -303,6 +378,55 @@ class CameraListener(Node):
                 f'RGB array: shape={pixels.shape}, dtype={pixels.dtype}, '
                 f'center[row={row}, col={column}]={pixels[row, column].tolist()}'
             )
+
+    def update_depth_pixels(self, depth: Image, rgb: Image) -> None:
+        """Decode depth only when its format, dimensions and frame match RGB."""
+        self.latest_depth_pixels = None
+        try:
+            if depth.encoding != '32FC1':
+                raise ValueError('Expected 32FC1 depth values in metres.')
+            if (depth.width, depth.height) != (rgb.width, rgb.height):
+                raise ValueError('Depth and RGB dimensions differ.')
+            if not rgb.header.frame_id or depth.header.frame_id != rgb.header.frame_id:
+                raise ValueError('Depth must share the nonempty RGB optical frame.')
+            image = _packed_image(depth, self.bridge)
+            pixels: NDArray[np.float32] = self.bridge.imgmsg_to_cv2(
+                image, desired_encoding='passthrough'
+            )
+            if pixels.shape != (rgb.height, rgb.width) or pixels.dtype != np.float32:
+                raise ValueError('Decoded depth is not a height-by-width float32 array.')
+        except (CvBridgeError, ValueError) as error:
+            self.get_logger().error(
+                f'Cannot decode aligned depth image ({depth.encoding}, '
+                f'{depth.width}x{depth.height}): {error}'
+            )
+            return
+        self.latest_depth_pixels = pixels
+        if self.received_pairs == 1 or self.received_pairs % 30 == 0:
+            self.get_logger().info(
+                f'Depth array: shape={pixels.shape}, dtype={pixels.dtype}, unit=metres'
+            )
+
+    def update_marker_depth(self, marker_mask: NDArray[np.uint8]) -> None:
+        """Report a current marker-depth estimate without retaining old values."""
+        self.latest_marker_depth = None
+        pixels = self.latest_depth_pixels
+        if pixels is None:
+            # The depth decoder already reported why this image is unavailable.
+            self._depth_reason = 'Depth image unavailable.'
+            return
+        distance, reason = measure_marker_depth(pixels, marker_mask)
+        self.latest_marker_depth = distance
+        if (
+            self.received_pairs == 1
+            or self.received_pairs % 30 == 0
+            or reason != self._depth_reason
+        ):
+            if distance is None:
+                self.get_logger().warning('Marker depth unavailable: ' + reason)
+            else:
+                self.get_logger().info(f'Marker depth: {distance:.6f}m')
+        self._depth_reason = reason
 
     def log_image(self, message: Image, label: str, count: int) -> None:
         """Log the first image and every 30th image from either stream."""
