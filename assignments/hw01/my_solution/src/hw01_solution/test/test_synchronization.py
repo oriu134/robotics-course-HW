@@ -2,6 +2,7 @@
 
 import struct
 
+import cv2
 from hw01_solution.camera_listener import CameraListener
 import numpy as np
 import pytest
@@ -36,6 +37,19 @@ def image_at(stamp_ns: int, *, depth: bool = False) -> Image:
         stamp_ns, 1_000_000_000
     )
     return message
+
+
+def marker_images(stamp_ns: int):
+    """Create aligned RGB/depth messages containing a complete red circle."""
+    pixels = np.zeros((40, 60, 3), dtype=np.uint8)
+    cv2.circle(pixels, (30, 20), 6, (255, 0, 0), -1)
+    rgb = image_at(stamp_ns)
+    rgb.width, rgb.height, rgb.step = 60, 40, 180
+    rgb.data = pixels.tobytes()
+    depth = image_at(stamp_ns, depth=True)
+    depth.width, depth.height, depth.step = 60, 40, 240
+    depth.data = np.ones((40, 60), dtype=np.float32).tobytes()
+    return rgb, depth
 
 
 @pytest.mark.parametrize('depth_first', [False, True])
@@ -205,3 +219,39 @@ def test_missing_red_region_replaces_previous_mask_and_is_reported(listener, cap
     assert mask is not None
     assert np.count_nonzero(mask) == 0
     assert 'no red region in current image' in capfd.readouterr().err
+
+
+def test_synchronized_images_store_marker_center(listener):
+    """Run region selection through the actual synchronized callback wiring."""
+    rgb, depth = marker_images(1_000_000_000)
+    listener.image_subscription.signalMessage(rgb)
+    listener.depth_subscription.signalMessage(depth)
+    marker = listener.latest_marker
+    assert marker is not None
+    assert marker.pixel == pytest.approx((30.0, 20.0))
+    assert marker.mask.shape == (40, 60)
+
+
+@pytest.mark.parametrize('failure', ['missing', 'ambiguous', 'decode_error'])
+def test_old_marker_is_cleared_and_failure_is_reported(listener, capfd, failure):
+    """Never keep a previously accepted center after a failed new observation."""
+    rgb, depth = marker_images(1_000_000_000)
+    listener.on_synchronized_images(rgb, depth)
+    assert listener.latest_marker is not None
+    capfd.readouterr()
+    rgb, depth = marker_images(2_000_000_000)
+    if failure == 'missing':
+        rgb.data = np.full((40, 60, 3), 219, dtype=np.uint8).tobytes()
+    elif failure == 'ambiguous':
+        pixels = np.frombuffer(rgb.data, dtype=np.uint8).reshape(40, 60, 3).copy()
+        cv2.circle(pixels, (12, 30), 5, (255, 0, 0), -1)
+        rgb.data = pixels.tobytes()
+    else:
+        rgb.data = b'\x00'
+    listener.on_synchronized_images(rgb, depth)
+    assert listener.latest_marker is None
+    output = capfd.readouterr().err
+    if failure == 'decode_error':
+        assert 'Cannot decode RGB image' in output
+    else:
+        assert 'Marker not detected' in output

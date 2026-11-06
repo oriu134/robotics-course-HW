@@ -114,8 +114,8 @@ Decoding errors are logged and clear the cached pixels rather than retaining an
 older image. RGB pixel information is printed for the first pair and every 30th
 pair. Restart the listener using the commands above after rebuilding.
 
-Step 2A makes pixel values available for the red-color mask described below.
-There is still no reliable marker-center detection, depth reconstruction, TF
+Step 2A makes pixel values available for the red-color mask and marker-region
+selection described below. There is still no depth reconstruction, TF
 transformation or arm movement.
 
 ## Step 2B: highlight candidate red pixels
@@ -142,8 +142,46 @@ mask. RGB decoding failures clear the mask too.
 
 These thresholds are a simple, testable starting heuristic for the course camera,
 not a complete object detector. Red noise or other red objects can also pass.
-Selecting the marker region, rejecting unreliable/occluded detections and finding
-its center are later steps. We do not yet publish a target or command movement.
+Step 2C below selects the marker region and checks its shape before accepting a
+center. We do not yet publish a target or command movement.
+
+## Step 2C: select a marker region and find its pixel center
+
+`detect_marker(mask)` uses OpenCV connected components to group neighboring white
+pixels. Regions smaller than 20 pixels are ignored as noise. Exactly one sizeable
+region must remain; multiple candidates are rejected instead of choosing the
+largest or guessing.
+
+The remaining region must not touch the image border. Its shorter/longer bounding
+box side ratio must be at least 0.75, its pixel area must occupy between 0.55 and
+0.90 of that box, and its contour circularity must be at least 0.70. These
+conservative heuristics suit the round marker viewed by the fixed overhead camera.
+They reject obvious clipping, elongated/partly occluded regions, squares and thin
+or hollow regions, but are not a guarantee against every possible occlusion or
+red distractor.
+
+An accepted `MarkerDetection` contains:
+
+- `pixel`: `(u, v)`, the average column and row of the selected component's pixels.
+  The values are floating point; they are not rounded or converted to metres.
+- `mask`: only the selected region, excluding the small noise regions. Later
+  depth sampling will use this mask rather than all red pixels.
+
+The function also returns a reason explaining acceptance or rejection.
+The node stores an accepted result in `latest_marker`. For example:
+
+```text
+Marker pixel: u=..., v=..., region_pixels=...
+```
+
+`u` increases to the right and `v` increases downward from the image's top-left.
+Failures produce `Marker not detected: ...` warnings. A new missing, ambiguous
+or malformed observation clears the previous marker; reason changes are reported
+immediately, with periodic reports every 30th pair too.
+
+This is still only an image-space observation. No 3D point, TF transformation,
+target publication or arm movement is implemented. Timestamp/wall-clock freshness
+guards for a stopped stream also remain necessary before commanding motion.
 
 ## Test camera input handling
 
@@ -165,7 +203,9 @@ consumption of matched messages. RGB tests verify array shape/type, RGB/BGR chan
 order, padded rows and explicit malformed-message errors with no stale fallback.
 Red-mask tests cover known colors, exact threshold boundaries, binary shape/type,
 input preservation and invalid arrays. They do not validate reliable marker
-selection or arm motion.
+selection on arbitrary real scenes or arm motion. Marker-region tests cover
+column/row order, subpixel centers, noise exclusion, the area boundary, ambiguity,
+clipping, obvious occlusion, non-marker shapes and clearing old detections.
 
 ## Run the example
 

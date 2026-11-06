@@ -1,7 +1,10 @@
-"""Receive camera inputs and highlight candidate red pixels without moving."""
+"""Receive camera inputs and locate a round red marker without moving."""
 
 import copy
+from dataclasses import dataclass
+import math
 
+import cv2
 from cv_bridge import CvBridge, CvBridgeError
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 import numpy as np
@@ -30,8 +33,65 @@ def make_red_mask(rgb_pixels: NDArray[np.uint8]) -> NDArray[np.uint8]:
     return is_red.astype(np.uint8) * np.uint8(255)
 
 
+@dataclass(frozen=True)
+class MarkerDetection:
+    """Keep the image-space center and mask of the selected marker region."""
+
+    pixel: tuple[float, float]
+    mask: NDArray[np.uint8]
+
+
+def detect_marker(mask: NDArray[np.uint8]) -> tuple[MarkerDetection | None, str]:
+    """Select one sizeable, approximately round red region or explain rejection."""
+    if mask.ndim != 2 or mask.size == 0 or mask.dtype != np.uint8:
+        raise ValueError('Expected a nonempty two-dimensional uint8 mask.')
+    if np.any((mask != 0) & (mask != 255)):
+        raise ValueError('Mask values must be 0 or 255.')
+    count, labels, stats, centers = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if count == 1:
+        return None, 'No red region.'
+    regions = [
+        index for index in range(1, count)
+        if stats[index, cv2.CC_STAT_AREA] >= 20
+    ]
+    if not regions:
+        return None, 'Red regions are too small.'
+    if len(regions) != 1:
+        return None, 'Multiple sizeable red regions; marker is ambiguous.'
+    region = regions[0]
+    x = int(stats[region, cv2.CC_STAT_LEFT])
+    y = int(stats[region, cv2.CC_STAT_TOP])
+    width = int(stats[region, cv2.CC_STAT_WIDTH])
+    height = int(stats[region, cv2.CC_STAT_HEIGHT])
+    area = int(stats[region, cv2.CC_STAT_AREA])
+    image_height, image_width = mask.shape
+    if x == 0 or y == 0 or x + width == image_width or y + height == image_height:
+        return None, 'Red region touches the image border.'
+    if min(width, height) / max(width, height) < 0.75:
+        return None, 'Red region is elongated (possible occlusion).'
+    fill = area / (width * height)
+    if not 0.55 <= fill <= 0.90:
+        return None, 'Red region does not have a filled round shape.'
+    region_mask: NDArray[np.uint8] = (
+        (labels == region).astype(np.uint8) * np.uint8(255)
+    )
+    contours, _ = cv2.findContours(
+        region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if len(contours) != 1:
+        return None, 'Red region outline is unreliable.'
+    perimeter = cv2.arcLength(contours[0], True)
+    if perimeter <= 0:
+        return None, 'Red region outline is degenerate.'
+    circularity = 4.0 * math.pi * cv2.contourArea(contours[0]) / perimeter**2
+    if circularity < 0.70:
+        return None, 'Red region is not round enough (possible occlusion).'
+    u, v = centers[region]
+    return MarkerDetection((float(u), float(v)), region_mask), 'Marker region accepted.'
+
+
 class CameraListener(Node):
-    """Report synchronized camera inputs and candidate red-pixel information."""
+    """Report synchronized camera inputs and accepted marker pixel centers."""
 
     def __init__(self) -> None:
         """Create camera subscriptions, a synchronizer and an RGB decoder."""
@@ -39,6 +99,8 @@ class CameraListener(Node):
         self.bridge = CvBridge()
         self.latest_rgb_pixels: NDArray[np.uint8] | None = None
         self.latest_red_mask: NDArray[np.uint8] | None = None
+        self.latest_marker: MarkerDetection | None = None
+        self._marker_reason: str | None = None
         self.received_images = 0
         self.received_depth_images = 0
         self.received_camera_info = 0
@@ -84,7 +146,7 @@ class CameraListener(Node):
         self.log_image(message, 'depth image', self.received_depth_images)
 
     def on_synchronized_images(self, rgb: Image, depth: Image) -> None:
-        """Decode matched RGB images and highlight their candidate red pixels."""
+        """Decode matched RGB images, form a red mask and locate the marker."""
         self.received_pairs += 1
         if self.received_pairs == 1 or self.received_pairs % 30 == 0:
             rgb_ns = Time.from_msg(rgb.header.stamp).nanoseconds
@@ -97,6 +159,7 @@ class CameraListener(Node):
                 f'delta={gap_seconds:.9f}s'
             )
         self.latest_red_mask = None
+        self.latest_marker = None
         self.update_rgb_pixels(rgb)
         if self.latest_rgb_pixels is not None:
             mask = make_red_mask(self.latest_rgb_pixels)
@@ -108,6 +171,24 @@ class CameraListener(Node):
                     self.get_logger().warning(message + '; no red region in current image.')
                 else:
                     self.get_logger().info(message)
+            detection, reason = detect_marker(mask)
+            self.latest_marker = detection
+            if (
+                self.received_pairs == 1
+                or self.received_pairs % 30 == 0
+                or reason != self._marker_reason
+            ):
+                if detection is None:
+                    self.get_logger().warning('Marker not detected: ' + reason)
+                else:
+                    u, v = detection.pixel
+                    area = int(np.count_nonzero(detection.mask))
+                    self.get_logger().info(
+                        f'Marker pixel: u={u:.2f}, v={v:.2f}, region_pixels={area}'
+                    )
+            self._marker_reason = reason
+        else:
+            self._marker_reason = 'RGB decoding failed.'
 
     def update_rgb_pixels(self, rgb: Image) -> None:
         """Decode the current RGB image and report one sample pixel."""
