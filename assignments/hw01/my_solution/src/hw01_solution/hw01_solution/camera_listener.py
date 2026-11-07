@@ -247,9 +247,9 @@ def measure_marker_depth(
 class CameraListener(Node):
     """Report synchronized marker pixel centers and camera-axis depth."""
 
-    def __init__(self) -> None:
+    def __init__(self, node_name: str = 'camera_listener', **node_options) -> None:
         """Create camera subscriptions, a synchronizer and an RGB decoder."""
-        super().__init__('camera_listener')
+        super().__init__(node_name, **node_options)
         self.bridge = CvBridge()
         self.latest_rgb_pixels: NDArray[np.uint8] | None = None
         self.latest_depth_pixels: NDArray[np.float32] | None = None
