@@ -279,7 +279,7 @@ Expected output:
 ```text
 Marker camera=(0.148, -0.052, 0.940) base=(0.352, -0.148, 0.060)
 Sending hover goal (0.352, -0.148, 0.140) in base_link.
-Motion succeeded: Trajectory completed; measured tip is 0.0001 m from the goal.
+Motion succeeded: Trajectory completed (tip 0.0001 m from goal).
 ```
 
 Once the tip hovers above the marker, the arm partly hides it from the overhead
