@@ -39,11 +39,11 @@ Step 2A, described below, now also converts the matched RGB image into pixels.
 Depth-pixel validation, stale-data handling, marker detection, reconstruction,
 transforms and motion are not implemented yet.
 
-Build in an Ubuntu/WSL terminal. The first command selects the current clone;
-change that path if you move the repository.
+Build in an Ubuntu/WSL terminal. The first command moves to your clone of the
+repository; replace the path with wherever you cloned it.
 
 ```bash
-cd "/mnt/c/Users/Or/Desktop/Robotics Assignments/robotics-course-HW"
+cd ~/robotics-course-HW
 source /opt/ros/jazzy/setup.bash
 cd assignments/hw01/my_solution
 colcon build --symlink-install --base-paths src --executor sequential
@@ -53,7 +53,7 @@ cd ../../..
 In terminal A (skip launching another simulation if one is already running):
 
 ```bash
-cd "/mnt/c/Users/Or/Desktop/Robotics Assignments/robotics-course-HW"
+cd ~/robotics-course-HW
 source /opt/ros/jazzy/setup.bash
 source assignments/hw01/environment/install/setup.bash
 ros2 launch hw01_sim simulation.launch.py preset:=1
@@ -62,7 +62,7 @@ ros2 launch hw01_sim simulation.launch.py preset:=1
 In terminal B, stop the old listener with Ctrl+C before running the updated one:
 
 ```bash
-cd "/mnt/c/Users/Or/Desktop/Robotics Assignments/robotics-course-HW"
+cd ~/robotics-course-HW
 source /opt/ros/jazzy/setup.bash
 source assignments/hw01/my_solution/install/setup.bash
 ros2 run hw01_solution camera_listener --ros-args -p use_sim_time:=true
