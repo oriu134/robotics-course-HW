@@ -239,16 +239,71 @@ The latest current estimate is stored in `latest_marker_depth`.
 Missing/unusable samples report a reason; malformed depth images report an error.
 A failed new observation clears the previous depth rather than reusing it.
 
-There is still no three-dimensional point, TF transformation, target publication
-or arm movement. Step 3B will combine this measured depth with the pixel center
-and the actual camera intrinsics.
+`camera_listener` itself still never moves the arm; Steps 3B-6 below build on it.
 
-## Test camera input handling
+## Steps 3B-6: reconstruct, transform and reach (`marker_reacher`)
 
-After building, run from the repository root:
+[marker_reacher](src/hw01_solution/hw01_solution/marker_reacher.py) subclasses
+`CameraListener`, so it reuses all the detection and depth logic above, and adds:
+
+1. **3D reconstruction (3B).** The intrinsic matrix `k` is read from the latest
+   `/camera/camera_info`; nothing is hardcoded. The calibration frame and size must
+   match the image. With pixel center `(u, v)` and optical-Z depth `Z`:
+   `Y = (v - cy) * Z / fy` and `X = (u - cx - skew * Y / Z) * Z / fx`, giving a point
+   in `camera_optical_frame`. It is published on `/hw01/target_camera`.
+2. **TF2 (4).** A `PointStamped` with the RGB header (frame and capture stamp) is
+   transformed into `base_link` using `tf2_ros.Buffer.lookup_transform` at the image
+   time and `tf2_geometry_msgs.do_transform_point`. A failed lookup means no target.
+   The marker estimate (before the offset) is published on `/hw01/target_base`.
+3. **Hover goal (5).** 0.08 m is added to the base-frame Z (marker top ≈ 0.06 m,
+   so goal Z ≈ 0.14 m) and the goal is sent with the provided
+   `hw01_sim.arm_client.ArmClient.move_to_point`. The helper does the IK.
+4. **Reporting / one motion (6).** A goal is sent only when no motion is active
+   (`arm.busy`) and three consecutive fresh observations agree within 1 cm. The
+   goal uses the latest observation, not an average. The future's `success` and
+   `message` are logged. A reported success is also compared with the
+   physics-measured `/hw01/measured_tip`; if it is more than 0.02 m away, it counts
+   as a failure. Failures are retried from a fresh observation after 2 s, at most
+   three times. After a success, the same target is not commanded again.
+
+Rejecting stale or missing data:
+
+- Simulated stamp older than 0.5 s relative to `/clock` → rejected. No `/clock`
+  yet → rejected. `use_sim_time` is forced on inside the node.
+- No synchronized pair for 2 wall-clock seconds (system-clock timer) → stored
+  observations are cleared.
+- Any rejected pair (no/ambiguous/occluded marker, invalid depth, no calibration,
+  TF failure) clears the stability history, so an earlier target is never reused.
+- Ctrl+C / SIGTERM cancel a pending motion through `ArmClient.cancel()` before exit.
+
+Run (simulation and `check_reach` already started, see below):
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+source assignments/hw01/environment/install/setup.bash
+source assignments/hw01/my_solution/install/setup.bash
+ros2 run hw01_solution marker_reacher
+```
+
+Expected output:
+
+```text
+Marker camera=(0.148, -0.052, 0.940) base=(0.352, -0.148, 0.060)
+Sending hover goal (0.352, -0.148, 0.140) in base_link.
+Motion succeeded: Trajectory completed; measured tip is 0.0001 m from the goal.
+```
+
+Once the tip hovers above the marker, the arm partly hides it from the overhead
+camera, so "not round enough (possible occlusion)" warnings after success are expected.
+
+## Test camera input handling
+
+After building, run from the repository root. The reacher tests import the motion
+helper, so source the shared environment too:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source assignments/hw01/environment/install/setup.bash
 cd assignments/hw01/my_solution
 ROS_DOMAIN_ID=93 colcon test --packages-select hw01_solution
 colcon test-result --verbose
