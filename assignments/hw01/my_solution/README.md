@@ -68,13 +68,12 @@ source assignments/hw01/my_solution/install/setup.bash
 ros2 run hw01_solution camera_listener --ros-args -p use_sim_time:=true
 ```
 
-Expect individual-message logs and a synchronized-pair log (order can vary):
+Expect individual-message logs (order can vary):
 
 ```text
 Received image #1: 320x240, encoding=rgb8, ...
 Received depth image #1: 320x240, encoding=32FC1, ...
-Received camera info #1: 320x240, fx=..., fy=..., cx=..., cy=..., ...
-Synchronized pair #1: RGB stamp=..., depth stamp=..., delta=0.000000000s
+Camera info #1: 320x240, fx=..., fy=..., cx=..., cy=..., frame=camera_optical_frame
 ```
 
 All should identify `camera_optical_frame` and include capture timestamps in
@@ -95,11 +94,8 @@ The synchronized-image callback now calls `update_rgb_pixels(rgb)`.
 into a NumPy array with channel order red, green, blue, including when the input
 encoding is `bgr8`. The latest successful result is stored in `latest_rgb_pixels`.
 
-For the course camera, expect additional output like:
-
-```text
-RGB array: shape=(240, 320, 3), dtype=uint8, center[row=120, col=160]=[R, G, B]
-```
+Decoding failures are logged as `Cannot decode RGB image (...)`; successful
+decoding is silent.
 
 The three entries of `shape` are height, width and color channels.
 `uint8` holds whole-number channel values from 0 to 255.
@@ -130,14 +126,8 @@ The result is stored in `latest_red_mask`, a two-dimensional `uint8` array:
 
 This is a mask, not a new ROS topic or another RGB image. It has shape
 `(height, width)`, with one flag per pixel instead of three color channels.
-Expect additional periodic output:
-
-```text
-Red mask: shape=(240, 320), red_pixels=...
-```
-
-The count is the number of pixels passing the color rule. A zero count produces
-a warning that the current image has no red region; it does not reuse an earlier
+The mask itself is not logged. An image with no red pixels produces the warning
+`Marker not detected: No red region.`; it does not reuse an earlier
 mask. RGB decoding failures clear the mask too.
 
 These thresholds are a simple, testable starting heuristic for the course camera,
@@ -195,7 +185,7 @@ The function also returns a reason explaining acceptance or rejection.
 The node stores an accepted result in `latest_marker`. For example:
 
 ```text
-Marker pixel: u=..., v=..., region_pixels=...
+Marker pixel: u=..., v=..., pixels=...
 ```
 
 `u` increases to the right and `v` increases downward from the image's top-left.
@@ -229,7 +219,6 @@ functions or thresholds from the handout. The report should explain them.
 Expected additional output:
 
 ```text
-Depth array: shape=(240, 320), dtype=float32, unit=metres
 Marker depth: 0.940000m
 ```
 

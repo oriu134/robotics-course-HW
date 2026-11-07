@@ -218,7 +218,7 @@ def test_missing_red_region_replaces_previous_mask_and_is_reported(listener, cap
     mask = listener.latest_red_mask
     assert mask is not None
     assert np.count_nonzero(mask) == 0
-    assert 'no red region in current image' in capfd.readouterr().err
+    assert 'Marker not detected: No red region' in capfd.readouterr().err
 
 
 def test_synchronized_images_store_marker_center(listener):
