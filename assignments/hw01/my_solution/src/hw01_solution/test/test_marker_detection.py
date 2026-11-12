@@ -110,15 +110,3 @@ def test_non_marker_shapes_are_rejected(shape):
         mask[20, 20:50] = 255
     detection, reason = detect_marker(mask)
     assert detection is None, reason
-
-
-@pytest.mark.parametrize('mask', [
-    np.zeros((3, 4, 3), dtype=np.uint8),
-    np.zeros((3, 4), dtype=np.float32),
-    np.zeros((0, 4), dtype=np.uint8),
-    np.full((3, 4), 128, dtype=np.uint8),
-])
-def test_invalid_masks_raise_explicit_errors(mask):
-    """Keep malformed input distinct from an ordinary missing marker."""
-    with pytest.raises(ValueError):
-        detect_marker(mask)

@@ -17,8 +17,8 @@ capture timestamps. All three subscriptions use sensor-data QoS:
 | `/camera/depth/image_raw` | `sensor_msgs/msg/Image` | Depth dimensions, encoding, frame and timestamp |
 | `/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | Dimensions, focal lengths, principal point, frame and timestamp |
 
-Each stream logs its first message and every 30th message afterward.
-RGB and depth share a small metadata-logging helper. Camera info provides the
+The listener subscribes to all three streams and keeps the latest calibration.
+Camera info provides the
 intrinsic matrix `k`; entries 0/4 are `fx`/`fy` and entries 2/5 are `cx`/`cy`.
 Depth uses `32FC1`: one 32-bit floating-point depth value per pixel, in metres.
 Step 3A below now decodes and validates depth samples inside the selected marker.
@@ -81,10 +81,8 @@ simulation time. Additional lines appear as messages arrive. The node initially
 reports that it is waiting if the simulation is not running.
 `use_sim_time:=true` makes the node's clock follow simulation time; the printed
 timestamps are taken directly from the incoming message headers.
-Both individual streams and synchronized pairs log their first item and every
-30th item afterward. Their counters need not agree. A zero `delta` means the
-two images have identical capture timestamps; a small nonzero difference is
-accepted only below the synchronization tolerance.
+RGB and depth are paired only when their capture timestamps differ by at most
+the synchronization tolerance (0.05 s).
 Stop the listener with Ctrl+C.
 
 ## Step 2A: inspect RGB pixels
@@ -103,12 +101,8 @@ Indexing uses `pixels[row, column]`, so `pixels[120, 160]` returns one RGB tripl
 The displayed center pixel is only an inspection example, not a detected marker
 or a commanded target. Its values vary with the scene.
 
-The converter checks dimensions, row stride and data length before decoding.
-This installed CvBridge version mishandles non-pixel-aligned row padding, so padded
-rows are packed on a copy before conversion; incoming messages are not modified.
-Decoding errors are logged and clear the cached pixels rather than retaining an
-older image. RGB pixel information is printed for the first pair and every 30th
-pair. Restart the listener using the commands above after rebuilding.
+CvBridge decodes the message using its declared encoding. Decoding errors are
+logged and clear the cached pixels rather than retaining an older image. Restart the listener using the commands above after rebuilding.
 
 Step 2A makes pixel values available for the red-color mask and marker-region
 selection described below. There is still no depth reconstruction, TF
@@ -190,8 +184,8 @@ Marker pixel: u=..., v=..., pixels=...
 
 `u` increases to the right and `v` increases downward from the image's top-left.
 Failures produce `Marker not detected: ...` warnings. A new missing, ambiguous
-or malformed observation clears the previous marker; reason changes are reported
-immediately, with periodic reports every 30th pair too.
+or malformed observation clears the previous marker; a message is logged
+whenever the reason changes.
 
 This is still only an image-space observation. No 3D point, TF transformation,
 target publication or arm movement is implemented. Timestamp/wall-clock freshness
@@ -202,8 +196,6 @@ guards for a stopped stream also remain necessary before commanding motion.
 `update_depth_pixels(depth, rgb)` checks the `32FC1` encoding, aligned dimensions
 and matching nonempty optical-frame headers. CvBridge then decodes the message
 with `desired_encoding='passthrough'` into a `(height, width)` float32 array.
-Both RGB and depth use `_packed_image` for shared storage validation and safe
-row-padding removal on a copy.
 
 `measure_marker_depth(depth_pixels, detection.mask)` selects only the accepted
 marker component, excluding background and small red-noise regions. Samples must
@@ -211,10 +203,10 @@ be finite and between 0.05 and 3.0 metres, matching the camera's clipping range.
 These limits only validate sensor measurements; they do not specify or assume
 the marker's position.
 
-At least half of the selected pixels must have usable depth. The method then
-returns their median, reducing the influence of isolated outliers. The median and
-50-percent requirement are our depth-selection choices, not prescribed helper
-functions or thresholds from the handout. The report should explain them.
+If no selected pixel has usable depth, the observation is rejected. Otherwise
+the method returns the median of the valid samples, reducing the influence of
+isolated outliers. The median is our depth-selection choice, not a prescribed
+helper function from the handout. The report explains it.
 
 Expected additional output:
 
@@ -248,12 +240,12 @@ A failed new observation clears the previous depth rather than reusing it.
    so goal Z ≈ 0.14 m) and the goal is sent with the provided
    `hw01_sim.arm_client.ArmClient.move_to_point`. The helper does the IK.
 4. **Reporting / one motion (6).** A goal is sent only when no motion is active
-   (`arm.busy`) and three consecutive fresh observations agree within 1 cm. The
-   goal uses the latest observation, not an average. The future's `success` and
+   (`arm.busy`), built from the current fresh observation. The future's `success` and
    `message` are logged. A reported success is also compared with the
    physics-measured `/hw01/measured_tip`; if it is more than 0.02 m away, it counts
    as a failure. Failures are retried from a fresh observation after 2 s, at most
-   three times. After a success, the same target is not commanded again.
+   three times. After a success no further goal is sent (one stationary marker
+   per launch).
 
 Rejecting stale or missing data:
 
@@ -262,7 +254,7 @@ Rejecting stale or missing data:
 - No synchronized pair for 2 wall-clock seconds (system-clock timer) → stored
   observations are cleared.
 - Any rejected pair (no/ambiguous/occluded marker, invalid depth, no calibration,
-  TF failure) clears the stability history, so an earlier target is never reused.
+  TF failure) clears the current target, so an earlier target is never reused.
 - Ctrl+C / SIGTERM cancel a pending motion through `ArmClient.cancel()` before exit.
 
 Run (simulation and `check_reach` already started, see below):

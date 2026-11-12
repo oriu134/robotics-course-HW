@@ -8,7 +8,6 @@ from hw01_solution.marker_reacher import (
     intrinsics_from_camera_info,
     MarkerReacher,
     pixel_to_optical_point,
-    STABLE_OBSERVATIONS,
 )
 import numpy as np
 import pytest
@@ -121,12 +120,6 @@ def test_back_projection_scales_with_optical_z_depth():
     assert (x, y, z) == (pytest.approx(0.2), pytest.approx(0.2), 2.0)
 
 
-@pytest.mark.parametrize('depth', [0.0, -1.0, float('nan'), float('inf')])
-def test_back_projection_rejects_invalid_depth(depth):
-    with pytest.raises(ValueError):
-        pixel_to_optical_point(0.0, 0.0, depth, Intrinsics(1, 1, 0, 0))
-
-
 def test_hover_goal_adds_offset_only_in_base_frame():
     target = PointStamped()
     target.header.frame_id = 'base_link'
@@ -155,10 +148,8 @@ def test_marker_is_transformed_with_tf2_and_published(reacher):
         pytest.approx(0.4), pytest.approx(0.0, abs=1e-6), pytest.approx(0.0, abs=1e-6))
 
 
-def test_one_goal_after_stable_observations_with_hover_offset(reacher):
+def test_one_goal_at_a_time_with_hover_offset(reacher):
     ready(reacher)
-    feed(reacher, count=STABLE_OBSERVATIONS - 1)
-    assert reacher.arm.goals == []
     feed(reacher, count=5)
     assert len(reacher.arm.goals) == 1, 'only one motion may be active'
     goal = reacher.arm.goals[0]
@@ -166,9 +157,9 @@ def test_one_goal_after_stable_observations_with_hover_offset(reacher):
     assert goal.point.z == pytest.approx(0.08)
 
 
-def test_success_is_not_repeated_for_the_same_target(reacher):
+def test_no_new_goal_after_success(reacher):
     ready(reacher)
-    feed(reacher, count=STABLE_OBSERVATIONS)
+    feed(reacher)
     reacher.arm.finish(True)
     feed(reacher, count=5)
     assert len(reacher.arm.goals) == 1
@@ -176,10 +167,10 @@ def test_success_is_not_repeated_for_the_same_target(reacher):
 
 def test_failure_is_reported_and_retried_later(reacher):
     ready(reacher)
-    feed(reacher, count=STABLE_OBSERVATIONS)
+    feed(reacher)
     reacher.arm.finish(False, 'target is outside the arm reach')
     assert reacher.failed_attempts == 1
-    feed(reacher, count=STABLE_OBSERVATIONS)
+    feed(reacher)
     assert len(reacher.arm.goals) == 1, 'retry waits for the delay'
     reacher.retry_after_wall = 0.0
     feed(reacher, count=1)
@@ -205,30 +196,30 @@ def test_missing_calibration_sends_no_goal(reacher):
     assert reacher.arm.goals == []
 
 
-def test_missing_marker_clears_earlier_observations(reacher):
+def test_missing_marker_does_not_reuse_earlier_target(reacher):
     ready(reacher)
-    feed(reacher, count=STABLE_OBSERVATIONS - 1)
+    feed(reacher)
+    reacher.arm.finish(False, 'controller unavailable')
+    reacher.retry_after_wall = 0.0
     rgb, depth = marker_images(NOW_NS)
     rgb.data = bytes(len(rgb.data))  # all black: no marker
     reacher.on_synchronized_images(rgb, depth)
     assert reacher.latest_target_base is None
-    feed(reacher, count=1)
-    assert reacher.arm.goals == []
+    assert len(reacher.arm.goals) == 1
 
 
 def test_camera_silence_invalidates_observations(reacher):
     ready(reacher)
-    feed(reacher, count=STABLE_OBSERVATIONS - 1)
+    feed(reacher)
+    assert reacher.latest_target_base is not None
     reacher.last_camera_wall -= 2.5
     reacher.check_camera_silence()
-    assert reacher.stable_targets == [] and reacher.latest_target_base is None
-    feed(reacher, count=1)
-    assert reacher.arm.goals == []
+    assert reacher.latest_target_base is None
 
 
 def test_interrupt_cancels_pending_motion(reacher):
     ready(reacher)
-    feed(reacher, count=STABLE_OBSERVATIONS)
+    feed(reacher)
     reacher.cancel_motion(timeout_sec=0.1)
     assert reacher.arm.cancelled
 
@@ -236,7 +227,7 @@ def test_interrupt_cancels_pending_motion(reacher):
 def test_reported_success_far_from_measured_tip_counts_as_failure(reacher):
     from geometry_msgs.msg import PoseStamped
     ready(reacher)
-    feed(reacher, count=STABLE_OBSERVATIONS)
+    feed(reacher)
     tip = PoseStamped()
     tip.header.frame_id = 'base_link'
     tip.header.stamp = Time(nanoseconds=NOW_NS).to_msg()
@@ -244,5 +235,5 @@ def test_reported_success_far_from_measured_tip_counts_as_failure(reacher):
     reacher.on_tip(tip)
     reacher.arm.finish(True)
     assert reacher.failed_attempts == 1
-    assert reacher.reached_target is None
+    assert not reacher.done
     assert np.isfinite(reacher.retry_after_wall)

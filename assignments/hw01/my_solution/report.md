@@ -15,7 +15,7 @@ Package: [`hw01_solution`](src/hw01_solution/) · main node:
                                      TF2 lookup at image stamp  ▼
                                     base_link ← camera_optical_frame
                                                                 │  publish /hw01/target_base
-                         3 agreeing fresh observations, arm idle ▼
+                    fresh observation, arm idle, no earlier success ▼
                        goal = target + (0, 0, 0.08) → ArmClient.move_to_point
                                                                 │
                       result.success/message + /hw01/measured_tip check → log
@@ -27,8 +27,8 @@ node forces `use_sim_time=True`, so all freshness checks use `/clock`.
 ## 2. Marker detection
 
 1. **Decoding.** Images go through `cv_bridge` using their declared encoding
-   (`rgb8` requested), after validating `step`/data length and removing row
-   padding, so no raw byte layout is assumed.
+   (`rgb8` requested), so no raw byte layout is assumed. Any decoding failure is
+   logged and the frame is skipped.
 2. **Color mask.** A pixel is a candidate if `R ≥ 150, G ≤ 100, B ≤ 100`. The
    marker is saturated red, and the grey/white scene and arm fail this rule.
 3. **Region selection.** I use `cv2.connectedComponentsWithStats` with
@@ -55,8 +55,8 @@ In the runs, the marker region was 87–91 px.
 platform and background pixels never contribute. The depth image must be
 `32FC1`, in the same frame and size as the RGB image (it is aligned). A sample is
 valid if it is finite and within the camera clip range [0.05, 3.0] m. This rejects
-NaN/±inf, zero, negative and out-of-range values. At least half of the mask
-pixels must be valid, otherwise the observation is rejected. The estimate is the
+NaN/±inf, zero, negative and out-of-range values. If no sample is valid, the
+observation is rejected. The estimate is the
 **median** of the valid samples. The marker top is flat and faces the camera, so
 its pixels share almost the same Z. The median ignores a few edge pixels that hit
 the platform or return invalid values, where a mean or minimum would be pulled
@@ -65,7 +65,7 @@ runs measured Z = 0.940 m, which matches the camera at 1.0 m above a marker top
 at 0.06 m.
 
 **Reconstruction.** The intrinsics come from the latest `CameraInfo`. Its frame
-and size must match the image, and `fx`, `fy` must be finite and positive.
+must match the image, and `fx`, `fy` must be finite and positive.
 Nothing is hardcoded; the simulator reports fx = fy = 277.13, cx = 160, cy = 120.
 With `k = [fx, s, cx; 0, fy, cy; 0, 0, 1]`:
 
@@ -103,9 +103,9 @@ the same synchronized pair.
 the provided `ArmClient.move_to_point` only when all of these hold:
 
 - the arm is idle (`arm.busy` is false), so only one motion is ever active;
-- the last 3 observations are fresh, consecutive and agree within 1 cm. The goal
-  uses the latest observation, not an average of old ones;
-- this target hasn't already been reached, and the retry delay has passed.
+- the goal is built from the current, fresh observation, never from an earlier one;
+- no motion has succeeded yet in this launch (each launch has one stationary
+  marker), and the retry delay has passed.
 
 The returned future is handled with a done-callback, so the executor keeps
 spinning and the camera callback never blocks. On completion the node logs
@@ -120,13 +120,13 @@ a new fresh observation after 2 s, at most 3 times.
 |---|---|
 | No red / tiny specks / several red regions | rejected; previous marker cleared |
 | Border-touching, elongated, unfilled or non-round region (occlusion) | rejected |
-| Depth invalid (NaN, inf, ≤0, out of range) or < 50 % valid in the mask | rejected |
+| No valid depth in the mask (NaN, inf, ≤0, out of range) | rejected |
 | Undecodable image, wrong encoding, RGB/depth size or frame mismatch | logged error; rejected |
-| Missing or invalid calibration, or calibration frame/size mismatch | rejected; nothing hardcoded is used instead |
+| Missing or invalid calibration, or calibration frame mismatch | rejected; nothing hardcoded is used instead |
 | Image stamp > 0.5 simulated s old, or no `/clock` yet | rejected as stale |
 | No synchronized pair for 2 wall-clock s (system-clock timer, works if sim pauses) | stored observations cleared; warning |
-| TF lookup fails (lookup, connectivity, extrapolation) | rejected; no target published |
-| Any rejected frame | stability history cleared, so an earlier target is never reused |
+| TF lookup fails (lookup, connectivity, extrapolation) | rejected; no `/hw01/target_base` published, no goal |
+| Any rejected frame | current target cleared, so an earlier target is never reused |
 | Helper rejects the goal or motion fails | `message` logged; retry after 2 s, max 3 |
 | Helper says success but measured tip is > 0.02 m off | counted as failure |
 | Ctrl+C / SIGTERM | `ArmClient.cancel()`, spin up to 2 s for the cancel, then clean shutdown |
@@ -156,7 +156,7 @@ The remaining 2–3 mm error comes from estimating the centroid from roughly
 90 pixels at about 3.4 mm per pixel at this depth. It is well within the 0.02 m
 tolerance.
 
-Unit tests: `colcon test` gives 107 passed, 1 skipped (the generated copyright
+Unit tests: `colcon test` gives 83 passed, 1 skipped (the generated copyright
 check). The tests run without Gazebo and cover:
 
 - synchronization boundaries and image decoding;

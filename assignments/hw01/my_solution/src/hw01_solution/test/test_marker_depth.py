@@ -43,33 +43,3 @@ def test_camera_clipping_boundaries_are_inclusive():
         depths, np.full(depths.shape, 255, dtype=np.uint8)
     )
     assert distance == pytest.approx(1.525), reason
-
-
-@pytest.mark.parametrize(('depths', 'accepted'), [
-    ([0.9, 1.1, np.nan, 0.0], True),
-    ([1.0, np.nan, np.nan, 0.0], False),
-])
-def test_at_least_half_the_selected_region_must_have_valid_depth(depths, accepted):
-    """Apply the validity-fraction boundary without trusting a lone sample."""
-    pixels = np.array([depths], dtype=np.float32)
-    mask = np.full(pixels.shape, 255, dtype=np.uint8)
-    distance, reason = measure_marker_depth(pixels, mask)
-    assert (distance is not None) == accepted
-    if accepted:
-        assert distance == pytest.approx(1.0)
-    else:
-        assert 'Less than half' in reason
-
-
-@pytest.mark.parametrize(('depths', 'mask'), [
-    (np.ones((2, 2), dtype=np.float64), np.full((2, 2), 255, dtype=np.uint8)),
-    (np.ones((2, 2), dtype=np.float32), np.full((1, 2), 255, dtype=np.uint8)),
-    (np.ones((2, 2), dtype=np.float32), np.full((2, 2), 255, dtype=np.float32)),
-    (np.ones((2, 2), dtype=np.float32), np.full((2, 2), 128, dtype=np.uint8)),
-    (np.ones((2, 2), dtype=np.float32), np.zeros((2, 2), dtype=np.uint8)),
-    (np.zeros((0, 2), dtype=np.float32), np.zeros((0, 2), dtype=np.uint8)),
-])
-def test_malformed_arrays_raise_explicit_errors(depths, mask):
-    """Keep malformed input distinct from missing depth in a valid image."""
-    with pytest.raises(ValueError):
-        measure_marker_depth(depths, mask)

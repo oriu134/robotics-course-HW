@@ -28,8 +28,6 @@ BASE_FRAME = 'base_link'
 HOVER_OFFSET_METRES = 0.08
 MAX_OBSERVATION_AGE_SECONDS = 0.5  # simulated time
 MAX_CAMERA_SILENCE_WALL_SECONDS = 2.0  # wall-clock time
-STABLE_OBSERVATIONS = 3  # agreeing observations in a row before moving
-STABLE_TOLERANCE_METRES = 0.01
 REACH_TOLERANCE_METRES = 0.02  # same tolerance as check_reach
 MAX_MOTION_ATTEMPTS = 3
 RETRY_DELAY_WALL_SECONDS = 2.0
@@ -65,9 +63,8 @@ def pixel_to_optical_point(
     Back-project pixel (u, v) with optical-Z depth into camera_optical_frame.
 
     Inverts u = fx*X/Z + skew*Y/Z + cx and v = fy*Y/Z + cy, with Z = depth.
+    The depth was already validated by measure_marker_depth.
     """
-    if not (math.isfinite(depth) and depth > 0.0):
-        raise ValueError('Depth must be finite and positive.')
     y = (v - intrinsics.cy) * depth / intrinsics.fy
     x = (u - intrinsics.cx - intrinsics.skew * y / depth) * depth / intrinsics.fx
     return x, y, depth
@@ -105,7 +102,6 @@ class MarkerReacher(CameraListener):
             'marker_reacher',
             parameter_overrides=[Parameter('use_sim_time', Parameter.Type.BOOL, True)],
         )
-        self.camera_info: CameraInfo | None = None
         self.latest_tip: PoseStamped | None = None
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -120,11 +116,10 @@ class MarkerReacher(CameraListener):
 
         # Observation state: cleared whenever an observation is missing or stale.
         self.latest_target_base: PointStamped | None = None
-        self.stable_targets: list[np.ndarray] = []
         self.last_camera_wall: float | None = None
         # Motion state.
         self.active_goal: PointStamped | None = None
-        self.reached_target: np.ndarray | None = None
+        self.done = False  # one stationary marker per launch: stop after success
         self.failed_attempts = 0
         self.retry_after_wall = 0.0
         self.shutting_down = False
@@ -136,11 +131,6 @@ class MarkerReacher(CameraListener):
         self.create_timer(0.5, self.check_camera_silence, clock=wall_clock)
 
     # ----- inputs -----
-
-    def on_camera_info(self, message: CameraInfo) -> None:
-        """Keep the latest calibration."""
-        super().on_camera_info(message)
-        self.camera_info = message
 
     def on_tip(self, message: PoseStamped) -> None:
         """Keep the physics-measured tip pose."""
@@ -175,9 +165,8 @@ class MarkerReacher(CameraListener):
             self.get_logger().warning('No camera data for 2 wall-clock seconds; not moving.')
 
     def forget_observations(self) -> None:
-        """Drop the current target and the stability history."""
+        """Drop the current target so it can never be reused."""
         self.latest_target_base = None
-        self.stable_targets.clear()
 
     def log_once(self, message: str, warning: bool = False) -> None:
         """Log only when the message changes, to avoid one line per frame."""
@@ -223,8 +212,6 @@ class MarkerReacher(CameraListener):
             raise Rejected('no camera calibration received yet.')
         if info.header.frame_id != rgb.header.frame_id:
             raise Rejected('camera calibration frame does not match the image frame.')
-        if (info.width, info.height) != (rgb.width, rgb.height):
-            raise Rejected('camera calibration size does not match the image.')
         u, v = self.latest_marker.pixel
         try:
             xyz = pixel_to_optical_point(
@@ -255,33 +242,20 @@ class MarkerReacher(CameraListener):
     # ----- motion -----
 
     def consider_motion(self, target: PointStamped) -> None:
-        """Send a hover goal once the target is stable and nothing blocks it."""
-        if not self.is_stable(_xyz(target)) or not self.may_send(_xyz(target)):
+        """Send a hover goal from this fresh observation unless something blocks it."""
+        if not self.may_send():
             return
-        goal = hover_goal(target)  # from this fresh observation, not an average
+        goal = hover_goal(target)
         self.active_goal = goal
         x, y, z = _xyz(goal)
         self.get_logger().info(f'Sending hover goal ({x:.3f}, {y:.3f}, {z:.3f}) in base_link.')
         self.arm.move_to_point(goal).add_done_callback(self.on_motion_done)
 
-    def is_stable(self, position: np.ndarray) -> bool:
-        """Record the position; True after 3 agreeing observations in a row."""
-        if self.stable_targets and np.linalg.norm(
-            position - self.stable_targets[-1]
-        ) > STABLE_TOLERANCE_METRES:
-            self.stable_targets.clear()
-        self.stable_targets = (self.stable_targets + [position])[-STABLE_OBSERVATIONS:]
-        return len(self.stable_targets) == STABLE_OBSERVATIONS
-
-    def may_send(self, position: np.ndarray) -> bool:
-        """Check the one-motion rule, already-reached target and retry limits."""
-        if self.arm.busy or self.failed_attempts >= MAX_MOTION_ATTEMPTS:
+    def may_send(self) -> bool:
+        """Check the one-motion rule, an earlier success and retry limits."""
+        if self.done or self.arm.busy or self.failed_attempts >= MAX_MOTION_ATTEMPTS:
             return False
         if time.monotonic() < self.retry_after_wall:
-            return False
-        if self.reached_target is not None and np.linalg.norm(
-            position - self.reached_target
-        ) <= STABLE_TOLERANCE_METRES:
             return False
         if not self.arm.ready():
             self.get_logger().warning('Motion helper not available yet.', throttle_duration_sec=5)
@@ -303,8 +277,7 @@ class MarkerReacher(CameraListener):
             return
         checked = 'no fresh measured tip' if error is None else f'tip {error:.4f} m from goal'
         self.get_logger().info(f'Motion succeeded: {result.message} ({checked}).')
-        self.reached_target = _xyz(goal) - [0.0, 0.0, HOVER_OFFSET_METRES]
-        self.failed_attempts = 0
+        self.done = True
 
     def record_failure(self, message: str) -> None:
         """Count a failed motion and schedule a retry from a fresh observation."""
