@@ -77,8 +77,8 @@ def _outline_rejection(region_mask: NDArray[np.uint8]) -> str | None:
     perimeter = cv2.arcLength(contours[0], True)
     if perimeter <= 0:
         return 'Red region outline is degenerate.'
-    # Circularity 4*pi*A/P^2 is 1 for a perfect circle; 0.70 allows pixelation.
-    if 4.0 * math.pi * cv2.contourArea(contours[0]) / perimeter**2 < 0.70:
+    # Circularity 4*pi*A/P^2 is 1 for a perfect circle; 0.50 allows pixelation.
+    if 4.0 * math.pi * cv2.contourArea(contours[0]) / perimeter**2 < 0.50:
         return 'Red region is not round enough (possible occlusion).'
     return None
 
