@@ -275,7 +275,14 @@ class MarkerReacher(CameraListener):
         if error is not None and error > REACH_TOLERANCE_METRES:
             self.record_failure(f'helper reported success but the tip is {error:.4f} m away')
             return
-        checked = 'no fresh measured tip' if error is None else f'tip {error:.4f} m from goal'
+        tip = self.latest_tip
+        where = '' if tip is None else ' at ({:.3f}, {:.3f}, {:.3f})'.format(
+            *_xyz(tip.pose.position)
+        )
+        checked = (
+            'no fresh measured tip' if error is None
+            else f'tip {error:.4f} m from goal{where}'
+        )
         self.get_logger().info(f'Motion succeeded: {result.message} ({checked}).')
         self.done = True
 
