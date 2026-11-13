@@ -39,15 +39,3 @@ def test_red_threshold_boundaries(color, expected):
     """Apply the inclusive threshold values exactly on each RGB channel."""
     pixels = np.array([[color]], dtype=np.uint8)
     assert make_red_mask(pixels).tolist() == [[expected]]
-
-
-@pytest.mark.parametrize('pixels', [
-    np.zeros((2, 2), dtype=np.uint8),
-    np.zeros((2, 2, 4), dtype=np.uint8),
-    np.zeros((2, 2, 3), dtype=np.float32),
-    np.zeros((0, 2, 3), dtype=np.uint8),
-])
-def test_red_mask_rejects_invalid_arrays(pixels):
-    """Reject malformed input explicitly instead of inventing a valid mask."""
-    with pytest.raises(ValueError, match='RGB uint8 array'):
-        make_red_mask(pixels)

@@ -3,7 +3,7 @@
 <package format="3">
   <name>hw01_solution</name>
   <version>0.0.0</version>
-  <description>HW1 student package: learning camera message reception.</description>
+  <description>HW1 student package: camera-guided marker reaching.</description>
   <maintainer email="student@example.invalid">HW1 student</maintainer>
   <license>Apache-2.0</license>
 
@@ -11,6 +11,11 @@
   <depend>sensor_msgs</depend>
   <depend>message_filters</depend>
   <depend>cv_bridge</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <exec_depend>hw01_sim</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
 

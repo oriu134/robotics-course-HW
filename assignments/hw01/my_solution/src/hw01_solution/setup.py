@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='HW1 student',
     maintainer_email='student@example.invalid',
-    description='HW1 student package: learning camera message reception.',
+    description='HW1 student package: camera-guided marker reaching.',
     license='Apache-2.0',
     extras_require={
         'test': [
@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'camera_listener = hw01_solution.camera_listener:main'
+            'camera_listener = hw01_solution.camera_listener:main',
+            'marker_reacher = hw01_solution.marker_reacher:main',
         ],
     },
 )

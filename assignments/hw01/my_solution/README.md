@@ -17,8 +17,8 @@ capture timestamps. All three subscriptions use sensor-data QoS:
 | `/camera/depth/image_raw` | `sensor_msgs/msg/Image` | Depth dimensions, encoding, frame and timestamp |
 | `/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | Dimensions, focal lengths, principal point, frame and timestamp |
 
-Each stream logs its first message and every 30th message afterward.
-RGB and depth share a small metadata-logging helper. Camera info provides the
+The listener subscribes to all three streams and keeps the latest calibration.
+Camera info provides the
 intrinsic matrix `k`; entries 0/4 are `fx`/`fy` and entries 2/5 are `cx`/`cy`.
 Depth uses `32FC1`: one 32-bit floating-point depth value per pixel, in metres.
 Step 3A below now decodes and validates depth samples inside the selected marker.
@@ -39,11 +39,11 @@ Step 2A, described below, now also converts the matched RGB image into pixels.
 Depth-pixel validation, stale-data handling, marker detection, reconstruction,
 transforms and motion are not implemented yet.
 
-Build in an Ubuntu/WSL terminal. The first command selects the current clone;
-change that path if you move the repository.
+Build in an Ubuntu/WSL terminal. The first command moves to your clone of the
+repository; replace the path with wherever you cloned it.
 
 ```bash
-cd "/mnt/c/Users/Or/Desktop/Robotics Assignments/robotics-course-HW"
+cd ~/robotics-course-HW
 source /opt/ros/jazzy/setup.bash
 cd assignments/hw01/my_solution
 colcon build --symlink-install --base-paths src --executor sequential
@@ -53,7 +53,7 @@ cd ../../..
 In terminal A (skip launching another simulation if one is already running):
 
 ```bash
-cd "/mnt/c/Users/Or/Desktop/Robotics Assignments/robotics-course-HW"
+cd ~/robotics-course-HW
 source /opt/ros/jazzy/setup.bash
 source assignments/hw01/environment/install/setup.bash
 ros2 launch hw01_sim simulation.launch.py preset:=1
@@ -62,19 +62,18 @@ ros2 launch hw01_sim simulation.launch.py preset:=1
 In terminal B, stop the old listener with Ctrl+C before running the updated one:
 
 ```bash
-cd "/mnt/c/Users/Or/Desktop/Robotics Assignments/robotics-course-HW"
+cd ~/robotics-course-HW
 source /opt/ros/jazzy/setup.bash
 source assignments/hw01/my_solution/install/setup.bash
 ros2 run hw01_solution camera_listener --ros-args -p use_sim_time:=true
 ```
 
-Expect individual-message logs and a synchronized-pair log (order can vary):
+Expect individual-message logs (order can vary):
 
 ```text
 Received image #1: 320x240, encoding=rgb8, ...
 Received depth image #1: 320x240, encoding=32FC1, ...
-Received camera info #1: 320x240, fx=..., fy=..., cx=..., cy=..., ...
-Synchronized pair #1: RGB stamp=..., depth stamp=..., delta=0.000000000s
+Camera info #1: 320x240, fx=..., fy=..., cx=..., cy=..., frame=camera_optical_frame
 ```
 
 All should identify `camera_optical_frame` and include capture timestamps in
@@ -82,10 +81,8 @@ simulation time. Additional lines appear as messages arrive. The node initially
 reports that it is waiting if the simulation is not running.
 `use_sim_time:=true` makes the node's clock follow simulation time; the printed
 timestamps are taken directly from the incoming message headers.
-Both individual streams and synchronized pairs log their first item and every
-30th item afterward. Their counters need not agree. A zero `delta` means the
-two images have identical capture timestamps; a small nonzero difference is
-accepted only below the synchronization tolerance.
+RGB and depth are paired only when their capture timestamps differ by at most
+the synchronization tolerance (0.05 s).
 Stop the listener with Ctrl+C.
 
 ## Step 2A: inspect RGB pixels
@@ -95,11 +92,8 @@ The synchronized-image callback now calls `update_rgb_pixels(rgb)`.
 into a NumPy array with channel order red, green, blue, including when the input
 encoding is `bgr8`. The latest successful result is stored in `latest_rgb_pixels`.
 
-For the course camera, expect additional output like:
-
-```text
-RGB array: shape=(240, 320, 3), dtype=uint8, center[row=120, col=160]=[R, G, B]
-```
+Decoding failures are logged as `Cannot decode RGB image (...)`; successful
+decoding is silent.
 
 The three entries of `shape` are height, width and color channels.
 `uint8` holds whole-number channel values from 0 to 255.
@@ -107,12 +101,8 @@ Indexing uses `pixels[row, column]`, so `pixels[120, 160]` returns one RGB tripl
 The displayed center pixel is only an inspection example, not a detected marker
 or a commanded target. Its values vary with the scene.
 
-The converter checks dimensions, row stride and data length before decoding.
-This installed CvBridge version mishandles non-pixel-aligned row padding, so padded
-rows are packed on a copy before conversion; incoming messages are not modified.
-Decoding errors are logged and clear the cached pixels rather than retaining an
-older image. RGB pixel information is printed for the first pair and every 30th
-pair. Restart the listener using the commands above after rebuilding.
+CvBridge decodes the message using its declared encoding. Decoding errors are
+logged and clear the cached pixels rather than retaining an older image. Restart the listener using the commands above after rebuilding.
 
 Step 2A makes pixel values available for the red-color mask and marker-region
 selection described below. There is still no depth reconstruction, TF
@@ -130,14 +120,8 @@ The result is stored in `latest_red_mask`, a two-dimensional `uint8` array:
 
 This is a mask, not a new ROS topic or another RGB image. It has shape
 `(height, width)`, with one flag per pixel instead of three color channels.
-Expect additional periodic output:
-
-```text
-Red mask: shape=(240, 320), red_pixels=...
-```
-
-The count is the number of pixels passing the color rule. A zero count produces
-a warning that the current image has no red region; it does not reuse an earlier
+The mask itself is not logged. An image with no red pixels produces the warning
+`Marker not detected: No red region.`; it does not reuse an earlier
 mask. RGB decoding failures clear the mask too.
 
 These thresholds are a simple, testable starting heuristic for the course camera,
@@ -195,13 +179,13 @@ The function also returns a reason explaining acceptance or rejection.
 The node stores an accepted result in `latest_marker`. For example:
 
 ```text
-Marker pixel: u=..., v=..., region_pixels=...
+Marker pixel: u=..., v=..., pixels=...
 ```
 
 `u` increases to the right and `v` increases downward from the image's top-left.
 Failures produce `Marker not detected: ...` warnings. A new missing, ambiguous
-or malformed observation clears the previous marker; reason changes are reported
-immediately, with periodic reports every 30th pair too.
+or malformed observation clears the previous marker; a message is logged
+whenever the reason changes.
 
 This is still only an image-space observation. No 3D point, TF transformation,
 target publication or arm movement is implemented. Timestamp/wall-clock freshness
@@ -212,8 +196,6 @@ guards for a stopped stream also remain necessary before commanding motion.
 `update_depth_pixels(depth, rgb)` checks the `32FC1` encoding, aligned dimensions
 and matching nonempty optical-frame headers. CvBridge then decodes the message
 with `desired_encoding='passthrough'` into a `(height, width)` float32 array.
-Both RGB and depth use `_packed_image` for shared storage validation and safe
-row-padding removal on a copy.
 
 `measure_marker_depth(depth_pixels, detection.mask)` selects only the accepted
 marker component, excluding background and small red-noise regions. Samples must
@@ -221,15 +203,14 @@ be finite and between 0.05 and 3.0 metres, matching the camera's clipping range.
 These limits only validate sensor measurements; they do not specify or assume
 the marker's position.
 
-At least half of the selected pixels must have usable depth. The method then
-returns their median, reducing the influence of isolated outliers. The median and
-50-percent requirement are our depth-selection choices, not prescribed helper
-functions or thresholds from the handout. The report should explain them.
+If no selected pixel has usable depth, the observation is rejected. Otherwise
+the method returns the median of the valid samples, reducing the influence of
+isolated outliers. The median is our depth-selection choice, not a prescribed
+helper function from the handout. The report explains it.
 
 Expected additional output:
 
 ```text
-Depth array: shape=(240, 320), dtype=float32, unit=metres
 Marker depth: 0.940000m
 ```
 
@@ -239,16 +220,71 @@ The latest current estimate is stored in `latest_marker_depth`.
 Missing/unusable samples report a reason; malformed depth images report an error.
 A failed new observation clears the previous depth rather than reusing it.
 
-There is still no three-dimensional point, TF transformation, target publication
-or arm movement. Step 3B will combine this measured depth with the pixel center
-and the actual camera intrinsics.
+`camera_listener` itself still never moves the arm; Steps 3B-6 below build on it.
 
-## Test camera input handling
+## Steps 3B-6: reconstruct, transform and reach (`marker_reacher`)
 
-After building, run from the repository root:
+[marker_reacher](src/hw01_solution/hw01_solution/marker_reacher.py) subclasses
+`CameraListener`, so it reuses all the detection and depth logic above, and adds:
+
+1. **3D reconstruction (3B).** The intrinsic matrix `k` is read from the latest
+   `/camera/camera_info`; nothing is hardcoded. The calibration frame and size must
+   match the image. With pixel center `(u, v)` and optical-Z depth `Z`:
+   `Y = (v - cy) * Z / fy` and `X = (u - cx - skew * Y / Z) * Z / fx`, giving a point
+   in `camera_optical_frame`. It is published on `/hw01/target_camera`.
+2. **TF2 (4).** A `PointStamped` with the RGB header (frame and capture stamp) is
+   transformed into `base_link` using `tf2_ros.Buffer.lookup_transform` at the image
+   time and `tf2_geometry_msgs.do_transform_point`. A failed lookup means no target.
+   The marker estimate (before the offset) is published on `/hw01/target_base`.
+3. **Hover goal (5).** 0.08 m is added to the base-frame Z (marker top ≈ 0.06 m,
+   so goal Z ≈ 0.14 m) and the goal is sent with the provided
+   `hw01_sim.arm_client.ArmClient.move_to_point`. The helper does the IK.
+4. **Reporting / one motion (6).** A goal is sent only when no motion is active
+   (`arm.busy`), built from the current fresh observation. The future's `success` and
+   `message` are logged. A reported success is also compared with the
+   physics-measured `/hw01/measured_tip`; if it is more than 0.02 m away, it counts
+   as a failure. Failures are retried from a fresh observation after 2 s, at most
+   three times. After a success no further goal is sent (one stationary marker
+   per launch).
+
+Rejecting stale or missing data:
+
+- Simulated stamp older than 0.5 s relative to `/clock` → rejected. No `/clock`
+  yet → rejected. `use_sim_time` is forced on inside the node.
+- No synchronized pair for 2 wall-clock seconds (system-clock timer) → stored
+  observations are cleared.
+- Any rejected pair (no/ambiguous/occluded marker, invalid depth, no calibration,
+  TF failure) clears the current target, so an earlier target is never reused.
+- Ctrl+C / SIGTERM cancel a pending motion through `ArmClient.cancel()` before exit.
+
+Run (simulation and `check_reach` already started, see below):
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+source assignments/hw01/environment/install/setup.bash
+source assignments/hw01/my_solution/install/setup.bash
+ros2 run hw01_solution marker_reacher
+```
+
+Expected output:
+
+```text
+Marker camera=(0.148, -0.052, 0.940) base=(0.352, -0.148, 0.060)
+Sending hover goal (0.352, -0.148, 0.140) in base_link.
+Motion succeeded: Trajectory completed (tip 0.0001 m from goal).
+```
+
+Once the tip hovers above the marker, the arm partly hides it from the overhead
+camera, so "not round enough (possible occlusion)" warnings after success are expected.
+
+## Test camera input handling
+
+After building, run from the repository root. The reacher tests import the motion
+helper, so source the shared environment too:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source assignments/hw01/environment/install/setup.bash
 cd assignments/hw01/my_solution
 ROS_DOMAIN_ID=93 colcon test --packages-select hw01_solution
 colcon test-result --verbose
