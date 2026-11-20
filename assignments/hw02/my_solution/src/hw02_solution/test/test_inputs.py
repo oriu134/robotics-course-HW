@@ -2,14 +2,17 @@
 
 import math
 import time
+from unittest.mock import Mock
 
 from geometry_msgs.msg import PoseStamped
+from hw02_solution import planner_inputs as inputs_module
 from hw02_solution.planner_inputs import PlannerInputs, read_grid, read_target
 from nav_msgs.msg import OccupancyGrid
 import pytest
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 
@@ -55,7 +58,10 @@ def rig():
     publishers['map'].publish(map_message())
     publishers['start'].publish(target())
     publishers['goal'].publish(target(2.25, -1.25))
-    node = PlannerInputs()
+    node = PlannerInputs(parameter_overrides=[
+        Parameter('samples', value=20), Parameter('neighbors', value=5),
+        Parameter('max_draws', value=500),
+    ])
     executor = SingleThreadedExecutor()
     executor.add_node(source)
     executor.add_node(node)
@@ -70,13 +76,23 @@ def rig():
 
 
 def test_late_subscriber_receives_all_inputs_without_motion(rig):
-    node, _, _ = rig
+    node, publishers, executor = rig
     assert node.ready
     assert node.get_parameter('use_sim_time').value is True
+    for name in ('seed', 'samples', 'neighbors', 'max_draws'):
+        descriptor = node.describe_parameter(name)
+        assert descriptor.name == name and descriptor.read_only
     assert node.grid is not None
     assert node.grid.data == tuple(map_message().data)
     assert node.targets == {'start': (1.75, -1.25), 'goal': (2.25, -1.25)}
     assert node.cspace is not None
+    assert node.roadmap is not None
+    assert node.roadmap.points[:2] == (node.targets['start'], node.targets['goal'])
+    previous = node.roadmap
+    publishers['map'].publish(map_message())
+    for _ in range(5):
+        executor.spin_once(timeout_sec=0.05)
+    assert node.roadmap is previous
     for subscription in node.subscriptions:
         if subscription.topic_name in ('/map', '/hw02/start', '/hw02/goal'):
             assert subscription.qos_profile.reliability == ReliabilityPolicy.RELIABLE
@@ -92,6 +108,7 @@ def test_invalid_map_is_logged_and_clears_previous_input(rig, capfd):
     spin_until(executor, lambda: node.grid is None)
     assert not node.ready
     assert node.cspace is None
+    assert node.roadmap is None
     captured = capfd.readouterr()
     assert 'Rejected map' in captured.out + captured.err
     publishers['map'].publish(map_message())
@@ -111,6 +128,7 @@ def test_invalid_goal_is_logged_and_never_reuses_previous_goal(rig, capfd, inval
     publishers['goal'].publish(invalid)
     spin_until(executor, lambda: 'goal' not in node.targets)
     assert not node.ready
+    assert node.roadmap is None
     captured = capfd.readouterr()
     assert 'Rejected goal' in captured.out + captured.err
     publishers['goal'].publish(target(2.25, -1.25))
@@ -125,6 +143,7 @@ def test_new_map_rechecks_target_bounds(rig, capfd):
     publishers['map'].publish(smaller)
     spin_until(executor, lambda: node.grid is not None and node.grid.width == 2)
     assert not node.ready
+    assert node.roadmap is None
     captured = capfd.readouterr()
     assert 'outside the map' in captured.out + captured.err
 
@@ -151,6 +170,7 @@ def test_target_in_inflated_wall_margin_is_rejected(rig, capfd):
     node, publishers, executor = rig
     publishers['goal'].publish(target(1.25, -1.25))
     spin_until(executor, lambda: not node.ready)
+    assert node.roadmap is None
     captured = capfd.readouterr()
     assert 'goal touches a configuration-space obstacle' in captured.out + captured.err
 
@@ -163,5 +183,22 @@ def test_changed_obstacles_rebuild_configuration_space(rig, capfd):
     publishers['map'].publish(changed)
     spin_until(executor, lambda: node.cspace != previous)
     assert not node.ready
+    assert node.roadmap is None
     captured = capfd.readouterr()
     assert 'touches a configuration-space obstacle' in captured.out + captured.err
+
+
+def test_roadmap_failure_is_logged_once_without_reusing_old_graph(rig, monkeypatch, capfd):
+    node, publishers, executor = rig
+    builder = Mock(side_effect=ValueError('Sampling budget exhausted'))
+    monkeypatch.setattr(inputs_module.prm, 'build_prm', builder)
+    publishers['goal'].publish(target(2.3, -1.2))
+    spin_until(executor, lambda: node.roadmap is None)
+    assert builder.call_count == 1
+    captured = capfd.readouterr()
+    assert 'Roadmap construction failed: Sampling budget exhausted' in captured.out + captured.err
+    publishers['map'].publish(map_message())
+    for _ in range(5):
+        executor.spin_once(timeout_sec=0.05)
+    assert builder.call_count == 1
+    assert node.roadmap is None

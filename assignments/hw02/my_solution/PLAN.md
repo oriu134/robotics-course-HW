@@ -1,8 +1,9 @@
 # HW02 implementation plan
 
-Phases 1-3 are complete: setup, input validation, configuration space, and collision
-checks passed local tests and headless verification. See [commands and results](README.md).
-PRM, A*, and route execution are not implemented. Implement and explain one phase
+Phases 1-4 are complete: setup, input validation, configuration space, collision
+checks, and PRM construction passed local tests and headless verification.
+See [commands and results](README.md).
+A* and route execution are not implemented. Implement and explain one phase
 at a time, verify it, commit it, then pause for review.
 
 ## Scope and isolation
@@ -108,6 +109,11 @@ unknown/boundary handling, narrow-gap behavior, and collision-free endpoints who
 connecting edge is nevertheless blocked.
 
 ### Phase 4 - Build the PRM
+
+Completed on 2026-11-20: 68 total tests pass; all nine layout/seed graphs pass
+safety/weighting/budget audits and intended connectivity checks. Live seed 0/1
+executables build once and remain stationary. Defaults: 2000 samples, 30 nearest
+candidates, 20000 maximum draws, one attempt per changed valid input set.
 
 - Sample only free configurations using an explicit seed.
 - Connect neighbors with Euclidean costs only after full-edge validation.

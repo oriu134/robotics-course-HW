@@ -3,8 +3,8 @@
 This directory contains two setup examples and our `hw02_solution` package. Complete the
 [installation guide](../environment/README.md) before implementing your planner.
 
-Phases 1-3 are verified. Our node validates inputs, builds configuration space,
-and checks start/goal clearance. PRM, A*, and movement are not implemented yet. See the
+Phases 1-4 are verified. Our node validates inputs, builds configuration space,
+and constructs a PRM graph. A* and movement are not implemented yet. See the
 [implementation plan](PLAN.md) for the next phases and review checkpoints.
 
 ## Build and check the environment
@@ -60,7 +60,7 @@ Use the same domain and partition in every HW02 terminal; choose different unuse
 values if these are already taken. `gui:=false` runs headless; omit it to request
 the Gazebo GUI. Interactive GUI/RViz was not part of this verification.
 
-## Build and run our geometry node (Phases 2-3)
+## Build and run our roadmap node (Phases 2-4)
 
 In terminal B, from the repository root, build the student package:
 
@@ -85,7 +85,9 @@ The node enables simulation time and waits for `/map`, `/hw02/start`, and
 `/hw02/goal`, using reliable/transient-local subscriptions. Look for `Inputs ready:`
 with map metadata, target coordinates, and `(row, column)` cells, ending with
 `No motion.` The node first logs `Configuration space ready: radius=0.30 m;`
-and the number of free cells. Press Ctrl+C to stop the node.
+and the number of free cells, then logs `Roadmap built:` with graph statistics.
+For default seed 0 in `wide`, expect `2002 nodes, 33374 edges`.
+Press Ctrl+C to stop the node.
 
 The small [grid module](src/hw02_solution/hw02_solution/grid.py) handles metadata
 and world/cell-center conversions without ROS. The
@@ -127,6 +129,49 @@ The node rebuilds C-space only when raw map contents/metadata change, clears it
 when a map is rejected, and logs an error if start/goal touches an inflated obstacle.
 It still has no movement interface. Publishing C-space/roadmap/path visualization
 topics is planned for Phase 6; currently C-space is stored internally.
+
+### PRM construction (Phase 4)
+
+The [roadmap module](src/hw02_solution/hw02_solution/roadmap.py) builds a collection
+of safe positions and safe straight connections. **This is a graph, not a selected
+route or an image.** A* will search this graph in Phase 5.
+
+The received start and goal are vertices 0 and 1. The builder draws uniform random
+positions in map bounds, rejects collisions/duplicates, then considers nearby
+vertices for connection. Our code checks each entire edge using Phase 3 and stores
+accepted edges in both directions with Euclidean distance as cost. SciPy's
+`cKDTree` only finds nearest candidates; it does not perform planning.
+
+Startup-only, read-only ROS parameters:
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `seed` | 0 | Reproducible random seed |
+| `samples` | 2000 | Accepted random vertices, in addition to start/goal |
+| `neighbors` | 30 | Nearest connection candidates per vertex, before collision filtering |
+| `max_draws` | 20000 | Maximum random candidate draws, including rejections |
+
+There is no separate edge-length cutoff. The undirected union of nearest-neighbor
+choices is used, so a vertex can have more than 30 final neighbors. At most
+`vertex_count * neighbors` distinct candidate pairs are checked, each only once.
+
+One construction attempt is made per valid changed input set; retries are zero.
+An exhausted sampling budget is an explicit error, not a successful partial graph.
+Unchanged latched inputs do not rebuild or repeatedly retry a failed graph.
+Changed or invalid map/target inputs discard the previous graph.
+
+Stop the current node before changing settings. For example, from the same
+configured terminal B:
+
+```bash
+ros2 run hw02_solution planner_inputs --ros-args -p seed:=1
+```
+
+The same seed, map, targets, and settings reproduce the same graph.
+The [node](src/hw02_solution/hw02_solution/planner_inputs.py) keeps it in memory
+as positions and weighted neighbor lists; visualization publication remains Phase 6.
+**`Roadmap built` does not mean `path found`:** the blocked room also has a graph,
+but start and goal are in separate components. No path search or movement occurs yet.
 
 ### Test the student package
 
@@ -252,8 +297,54 @@ raw maps with the received float32 resolution:
 All free-cell centers have at least 0.3125 m clearance from physical walls/pillars,
 exceeding the required 0.30 m radius. Inflation took approximately 0.02-0.03 seconds
 per supplied map on this machine. Connectivity labeling was a verification oracle
-only, not a student planner: PRM and A* remain unimplemented.
+only, not a student planner. At the end of Phase 3, PRM and A* were still unimplemented.
 
 Live checks used domain 86 and partition `hw02_phase3_20261120`; all owned processes
 were stopped afterward. Logs are ignored under `build/hw02/phase3/`. The same
 third-party Flake8 fork warnings noted in Phase 2 remain; all tests pass.
+
+## Phase 4 verification results
+
+Verified on 2026-11-20. Six focused tests were added in this phase: five PRM tests
+and one ROS failure/cache regression. **68 total student tests pass**, with no
+failures or skips. Existing input tests also verify graph invalidation, caching,
+and independent read-only parameter descriptors.
+
+The selected uniform settings above passed all supplied layouts with seeds 0/1/2.
+Every vertex and accepted edge was rechecked for collision freedom, symmetric
+adjacency, Euclidean cost, and finite budgets. Independent continuous segment-to-pillar
+and wall-distance calculations found at least 0.3014 m physical clearance on every
+accepted edge in this audit, exceeding the required 0.30 m.
+
+| Layout | Seed | Nodes | Edges | Draws | Build time (s) | Start/goal connected |
+| --- | --- | --- | --- | --- | --- | --- |
+| `wide` | 0 | 2002 | 33374 | 3398 | 0.5525 | Yes |
+| `wide` | 1 | 2002 | 33470 | 3516 | 0.4553 | Yes |
+| `wide` | 2 | 2002 | 33554 | 3375 | 0.4551 | Yes |
+| `mixed` | 0 | 2002 | 33525 | 3674 | 0.4699 | Yes |
+| `mixed` | 1 | 2002 | 33591 | 3777 | 0.4877 | Yes |
+| `mixed` | 2 | 2002 | 33496 | 3696 | 0.4828 | Yes |
+| `blocked` | 0 | 2002 | 33407 | 3054 | 0.4084 | No |
+| `blocked` | 1 | 2002 | 33400 | 2998 | 0.4396 | No |
+| `blocked` | 2 | 2002 | 33311 | 3020 | 0.4066 | No |
+
+Connectivity was checked by an independent test traversal, not a production route
+search. Repeating `wide`, seed 0, produced the identical graph. No path lengths or
+execution outcomes are claimed in this phase.
+
+Smaller settings missed valid narrow passages: 1000 samples/15 neighbors missed
+`mixed` seed 0; increasing only samples or only neighbors still missed one tested
+seed. Using 2000/30 connected all three solvable seeds without layout-specific
+logic. This illustrates why a finite PRM failure is not proof of physical impossibility.
+
+The installed executable passed live checks in a fresh headless `wide` world with
+default seed 0 and CLI override seed 1. Both graphs matched the offline audit,
+were built only once despite repeated map/target messages, and remained motion-free
+for three simulated seconds each. Independent monitoring measured zero displacement
+and velocity to nine decimal places, fresh physics data, no contact, and no movement
+publishers/action-service clients.
+
+Pylance syntax checks and constructor-call compatibility checks passed. The existing
+third-party lint warnings remain, with all tests passing. Live validation used
+domain 86 and partition `hw02_phase4_20261120`; all owned processes stopped afterward.
+Audit, tuning, and runtime logs are ignored under `build/hw02/phase4/`.
