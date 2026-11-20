@@ -3,11 +3,14 @@
 This directory contains two setup examples and our `hw02_solution` package. Complete the
 [installation guide](../environment/README.md) before implementing your planner.
 
-Phases 1-7 are verified. Our node plans, publishes/saves results, and can execute
-the route through the provided helper. **Movement is disabled by default** and
-requires the startup parameter `execute:=true`. The full multi-seed execution
-matrix and final report remain Phase 8. See the
-[implementation plan](PLAN.md) for the next phases and review checkpoints.
+All eight phases are complete. Our node plans, publishes/saves results, and can
+execute the route through the provided helper. **Movement is disabled by default**
+and requires the startup parameter `execute:=true`.
+The [final report](report.md) contains the full verified seed matrix, theory,
+figures, dependencies, and exact build/run commands. The
+[implementation plan](PLAN.md) records the completed review checkpoints.
+The existing fork PR remains a draft; author names and formal course-submission
+metadata are intentionally deferred.
 
 ## Build and check the environment
 
@@ -652,5 +655,36 @@ occurred. Logs retain explicit failure reasons; there is no success fallback.
 Live completion checks used isolated domain 86; fault injection used domain 87
 and distinct `hw02_phase7_LAYOUT_SEED_MODE` Gazebo partitions. All agent-started
 validation processes were stopped afterward. Logs/trajectories are ignored under
-`build/hw02/phase7/`; the final six-run solvable seed matrix remains Phase 8.
+`build/hw02/phase7/`. At the end of Phase 7, only seed 0 had live execution
+evidence; Phase 8 below completes the required seed matrix.
 Known third-party lint warnings remain, with all checks passing.
+
+## Phase 8 final verification and report
+
+Completed on 2026-11-20 without changing implementation code:
+
+| Required cases | Actual public observer outcome |
+| --- | --- |
+| `wide`, seeds 0/1/2 | All PASS: arrived, stopped, contact-clear |
+| `mixed`, seeds 0/1/2 | All PASS: arrived, stopped, contact-clear |
+| `blocked`, seed 0 | PASS: no path, zero destinations, no movement |
+
+The largest measured goal error across the six solvable runs was 0.019086 m,
+below the required 0.10 m. Every run used a fresh world and observer started before
+the implementation, with extra stopped-time monitoring after verification.
+Remaining-seed runs used isolated domains 86/87 and unique Gazebo partitions;
+all agent-started processes were stopped afterward.
+
+Final validation passed **21 unchanged public infrastructure tests** and
+**85 student tests**, with no failures or skips. Existing third-party lint
+warnings remain. The saved figures and optional RViz-rendering limitation are
+unchanged.
+
+The [report](report.md) records all parameters, retry limits, node/edge counts,
+draws, full algorithm-only planning times, path lengths, real execution outcomes,
+failure handling, and all three required figures. Planning timing is explicitly
+separate from ROS/plotting/control and execution wall time.
+
+No HW01 files, supplied environment/examples/public tests, generated build output,
+or local logs are part of the PR changes. No formal course-grading PR was created;
+the existing fork PR stays a draft as requested.

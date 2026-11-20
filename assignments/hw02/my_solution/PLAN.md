@@ -1,11 +1,12 @@
 # HW02 implementation plan
 
-Phases 1-7 are complete: planning, latched ROS outputs, figures, and opt-in
-waypoint execution passed local tests and live verification. RViz startup/subscription passed; manual GUI
+All eight phases are complete: planning, outputs, figures, the full execution seed
+matrix, and [the final report](report.md) are verified.
+RViz startup/subscription passed; manual GUI
 rendering remains unconfirmed, with an upstream first-map shader warning documented.
 See [commands and results](README.md).
-The full execution seed matrix and final report remain Phase 8. Implement and explain one phase
-at a time, verify it, commit it, then pause for review.
+The fork PR remains a draft for review. Author names and formal course-submission
+title/destination are intentionally deferred; no grading submission was created.
 
 ## Scope and isolation
 
@@ -178,6 +179,11 @@ stop safely without a next waypoint. Movement requires `execute:=true`.
 a fresh `wide` run passes the independent observer started before our node.
 
 ### Phase 8 - Full experiments, report, and submission review
+
+Completed on 2026-11-20: all six solvable executions and the blocked demonstration
+pass the public observer. Final checks pass 21 supplied and 85 student tests.
+The report includes all required metrics, figures, commands, and limitations;
+the branch/PR contains only HW02 student work.
 
 - Run fresh worlds for `wide` and `mixed` with seeds 0, 1, and 2, plus a bounded
   no-path run for `blocked`. Start the public observer before every run.
