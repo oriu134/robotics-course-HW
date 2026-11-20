@@ -1,9 +1,10 @@
 # Your HW2 implementation
 
-This directory contains only two setup examples. Complete the
+This directory contains two setup examples and our `hw02_solution` package. Complete the
 [installation guide](../environment/README.md) before implementing your planner.
 
-Phase 1 is verified; planner implementation has not started. See the
+Phases 1 and 2 are verified. Our node only receives and validates inputs; planning
+and movement are not implemented yet. See the
 [implementation plan](PLAN.md) for the next phases and review checkpoints.
 
 ## Build and check the environment
@@ -59,7 +60,65 @@ Use the same domain and partition in every HW02 terminal; choose different unuse
 values if these are already taken. `gui:=false` runs headless; omit it to request
 the Gazebo GUI. Interactive GUI/RViz was not part of this verification.
 
-## Use one-destination movement
+## Build and run our inputs-only node (Phase 2)
+
+In terminal B, from the repository root, build the student package:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source assignments/hw02/environment/install/setup.bash
+colcon --log-base assignments/hw02/my_solution/log build \
+  --symlink-install --base-paths assignments/hw02/my_solution/src \
+  --build-base assignments/hw02/my_solution/build \
+  --install-base assignments/hw02/my_solution/install --executor sequential
+source assignments/hw02/my_solution/install/setup.bash
+```
+
+Keep the simulation from terminal A running, then run in B:
+
+```bash
+export ROS_DOMAIN_ID=42 GZ_PARTITION=hw02_phase1_20261120
+ros2 run hw02_solution planner_inputs
+```
+
+The node enables simulation time and waits for `/map`, `/hw02/start`, and
+`/hw02/goal`, using reliable/transient-local subscriptions. Look for `Inputs ready:`
+with map metadata, target coordinates, and `(row, column)` cells, ending with
+`No motion.` Press Ctrl+C to stop the node.
+
+The small [grid module](src/hw02_solution/hw02_solution/grid.py) handles metadata
+and world/cell-center conversions without ROS. The
+[input node](src/hw02_solution/hw02_solution/planner_inputs.py) checks message
+frames, finite planar coordinates, map shape, occupancy range, and target bounds.
+It supports translated, axis-aligned maps and explicitly rejects rotated or
+nonplanar maps. The supplied map has identity rotation.
+
+Invalid updates are logged and clear readiness instead of reusing an older
+accepted input. Raw unknown cells (`-1`) are preserved; inflation and occupancy
+collision checks belong to Phase 3. Cell indices use the resolution actually
+received in the message: its float32 representation can place a point on a
+nominal grid line in the preceding cell. No map coordinates are hardcoded.
+
+### Test the student package
+
+After building and sourcing as above, run from the repository root:
+
+```bash
+ROS_DOMAIN_ID=85 colcon --log-base assignments/hw02/my_solution/log test \
+  --base-paths assignments/hw02/my_solution/src \
+  --build-base assignments/hw02/my_solution/build \
+  --install-base assignments/hw02/my_solution/install \
+  --packages-select hw02_solution --event-handlers console_direct+ \
+  --return-code-on-test-failure
+colcon --log-base assignments/hw02/my_solution/log test-result \
+  --test-result-base assignments/hw02/my_solution/build --verbose
+```
+
+Domain 85 must be unused: these tests publish fake maps and targets, not real
+simulation data. The core grid tests do not require ROS; the input tests use
+isolated ROS nodes and do not require Gazebo.
+
+## Use one-destination movement (for a later phase)
 
 ```python
 from hw02_sim.robot_client import RobotClient
@@ -115,3 +174,25 @@ before restarting; do not run a second world in the same partition.
 
 Local run logs are ignored under `build/hw02/phase1/`; the saved raw map is under
 `build/hw02/demo_map/`. Restart the simulation before the next phase or demo.
+
+## Phase 2 verification results
+
+Verified on 2026-11-20 using the same Ubuntu/ROS installation:
+
+| Check | Observed result |
+| --- | --- |
+| Student package build | `hw02_solution` built; installed executable starts |
+| Grid tests | 23 passed: row-major conversion, translated origin, cell centers, bounds/roundoff, invalid metadata, unknown values |
+| ROS input tests | 8 passed: one-shot latched inputs published before subscription, invalid-update logging/clearing, recovery, new-map bounds, simulation time, no velocity publisher |
+| Standard ROS lint tests | Flake8 and PEP 257 passed |
+| Test result summary | 33 tests, 0 errors, 0 failures, 0 skipped |
+| Pylance syntax checks | Both source modules and both behavior-test modules passed |
+| Fresh headless `wide` world | Readiness passed; separately installed input node received all inputs after simulation startup |
+| Independent physics monitoring | Three simulated seconds, zero displacement and velocity at nine decimal places, no obstacle contact, fresh pose/velocity/clock/contact data |
+| ROS graph inspection | Input node has no velocity publisher or go-to service clients |
+
+The generated Flake8 test emits Python 3.12 multi-threaded-fork warnings; lint
+and behavior tests pass. Live validation used separate domain 86 and partition
+`hw02_phase2_20261120`; all owned validation processes stopped afterward. Logs
+are ignored under `build/hw02/phase2/`. This verifies input handling only, not
+configuration space, planning, or route execution.

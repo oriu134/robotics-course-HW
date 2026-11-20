@@ -1,9 +1,10 @@
 # HW02 implementation plan
 
-Phase 1 is complete: the environment, public tests, and setup examples passed
-local headless verification. See [commands and results](README.md).
-No planner code has been implemented. Implement and explain one phase at a time,
-verify it, commit it, then pause for review.
+Phases 1 and 2 are complete: setup and the inputs-only package passed local tests
+and headless verification. See [commands and results](README.md).
+Input validation is implemented; configuration space, PRM, A*, and route execution
+are not. Implement and explain one phase at a time, verify it, commit it, then
+pause for review.
 
 ## Scope and isolation
 
@@ -76,6 +77,9 @@ Completed on 2026-11-20; interactive GUI/RViz remains unverified.
 blocker clearly separated from student-code problems. Restart after example motion.
 
 ### Phase 2 - Package and map inputs, with no movement
+
+Completed on 2026-11-20: 33 tests pass; the installed executable receives live
+inputs and independent physics confirms three simulated seconds without movement.
 
 - Scaffold the package using ROS tools and declare dependencies.
 - Subscribe to `/map`, `/hw02/start`, and `/hw02/goal` with reliable,
