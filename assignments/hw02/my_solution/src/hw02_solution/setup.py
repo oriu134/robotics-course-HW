@@ -11,7 +11,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
     ],
-    install_requires=['setuptools', 'numpy', 'scipy'],
+    install_requires=['setuptools', 'numpy', 'scipy', 'matplotlib'],
     zip_safe=True,
     maintainer='HW02 student',
     maintainer_email='student@example.invalid',

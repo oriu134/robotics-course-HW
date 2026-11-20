@@ -1,9 +1,10 @@
 # HW02 implementation plan
 
-Phases 1-5 are complete: setup, input validation, configuration space, collision
-checks, PRM construction, and A* routes passed local tests and headless verification.
+Phases 1-6 are complete: planning, latched ROS outputs, and saved figures passed
+local tests and live verification. RViz startup/subscription passed; manual GUI
+rendering remains unconfirmed, with an upstream first-map shader warning documented.
 See [commands and results](README.md).
-Visualization publication and route execution are not implemented. Implement and explain one phase
+Route execution is not implemented. Implement and explain one phase
 at a time, verify it, commit it, then pause for review.
 
 ## Scope and isolation
@@ -141,6 +142,10 @@ finds a complete route or reports no path, caches the result, and stays stationa
 segments are valid; bounded failure is distinguishable from invalid input.
 
 ### Phase 6 - ROS outputs and saved figures
+
+Completed on 2026-11-20: 77 total tests pass; all four topics reach true late
+subscribers in every layout; three correctly oriented figures are saved and
+visually checked. The public blocked observer passes; all layouts stay stationary.
 
 - Publish `/hw02/cspace` as `OccupancyGrid` with unchanged map metadata,
   `/hw02/roadmap` as `MarkerArray`, `/hw02/planned_path` as `Path`, and

@@ -7,13 +7,15 @@ from unittest.mock import Mock
 from geometry_msgs.msg import PoseStamped
 from hw02_solution import planner_inputs as inputs_module
 from hw02_solution.planner_inputs import PlannerInputs, read_grid, read_target
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Path
 import pytest
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import String
+from visualization_msgs.msg import Marker, MarkerArray
 
 
 def map_message():
@@ -61,6 +63,7 @@ def rig():
     node = PlannerInputs(parameter_overrides=[
         Parameter('samples', value=20), Parameter('neighbors', value=5),
         Parameter('max_draws', value=500),
+        Parameter('figure_path', value=''),
     ])
     executor = SingleThreadedExecutor()
     executor.add_node(source)
@@ -79,7 +82,7 @@ def test_late_subscriber_receives_all_inputs_without_motion(rig):
     node, publishers, executor = rig
     assert node.ready
     assert node.get_parameter('use_sim_time').value is True
-    for name in ('seed', 'samples', 'neighbors', 'max_draws'):
+    for name in ('seed', 'samples', 'neighbors', 'max_draws', 'figure_path'):
         descriptor = node.describe_parameter(name)
         assert descriptor.name == name and descriptor.read_only
     assert node.grid is not None
@@ -235,3 +238,53 @@ def test_no_path_and_validation_errors_never_keep_an_old_route(rig, monkeypatch,
     assert node.path is None
     captured = capfd.readouterr()
     assert 'Route planning failed: Unsafe route' in captured.out + captured.err
+
+
+def test_late_outputs_and_failed_updates_clear_stale_visuals(rig, monkeypatch, tmp_path, capfd):
+    node, publishers, executor = rig
+    listener = Node('hw02_late_output_test')
+    executor.add_node(listener)
+    latest = {}
+    qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                     durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    try:
+        for name, topic, kind in (
+            ('map', '/hw02/cspace', OccupancyGrid),
+            ('graph', '/hw02/roadmap', MarkerArray),
+            ('path', '/hw02/planned_path', Path),
+            ('status', '/hw02/planner_status', String),
+        ):
+            listener.create_subscription(
+                kind, topic, lambda message, key=name: latest.update({key: message}), qos)
+        spin_until(executor, lambda: len(latest) == 4)
+        assert latest['status'].data == 'path_found'
+        assert latest['map'].info == map_message().info
+        assert tuple(latest['map'].data) == node.cspace.data
+        assert len(latest['path'].poses) == len(node.path.points)
+        for publisher in node.publishers:
+            if publisher.topic_name.startswith('/hw02/'):
+                assert publisher.qos_profile.reliability == ReliabilityPolicy.RELIABLE
+                assert publisher.qos_profile.durability == DurabilityPolicy.TRANSIENT_LOCAL
+        invalid = map_message()
+        invalid.header.frame_id = 'odom'
+        publishers['map'].publish(invalid)
+        spin_until(executor, lambda: latest['status'].data == 'failed'
+                   and not latest['path'].poses
+                   and len(latest['graph'].markers) == 1
+                   and set(latest['map'].data) == {100})
+        assert latest['graph'].markers[0].action == Marker.DELETEALL
+        assert latest['map'].info == map_message().info
+        publishers['map'].publish(map_message())
+        spin_until(executor, lambda: latest['status'].data == 'path_found')
+        node.figure_path = str(tmp_path / 'failed.png')
+        monkeypatch.setattr(
+            inputs_module.outputs, 'save_figure',
+            Mock(side_effect=OSError('disk unavailable')))
+        publishers['goal'].publish(target(2.3, -1.2))
+        spin_until(executor, lambda: latest['status'].data == 'failed'
+                   and not latest['path'].poses and node.path is None)
+        captured = capfd.readouterr()
+        assert 'Figure export failed: disk unavailable' in captured.out + captured.err
+    finally:
+        executor.remove_node(listener)
+        listener.destroy_node()

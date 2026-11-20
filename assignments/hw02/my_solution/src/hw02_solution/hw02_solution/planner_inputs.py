@@ -1,17 +1,21 @@
 """Plan a complete PRM/A* route without commanding robot movement."""
 
+from copy import deepcopy
 import math
 import time
 
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import MapMetaData, OccupancyGrid, Path
 from rcl_interfaces.msg import ParameterDescriptor
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import String
+from visualization_msgs.msg import MarkerArray
 
+from . import outputs
 from . import roadmap as prm
 from . import search
 from .cspace import inflate, PLANNING_RADIUS, point_is_free
@@ -66,12 +70,22 @@ class PlannerInputs(Node):
                 ('seed', 0), ('samples', prm.DEFAULT_SAMPLES),
                 ('neighbors', prm.DEFAULT_NEIGHBORS), ('max_draws', prm.DEFAULT_MAX_DRAWS))
         }
+        self.figure_path = self.declare_parameter(
+            'figure_path', 'build/hw02/planner.png', ParameterDescriptor(read_only=True)
+        ).get_parameter_value().string_value
         self.grid: GridMap | None = None
         self.cspace: GridMap | None = None
+        self.map_info: MapMetaData | None = None
         self.roadmap: prm.Roadmap | None = None
         self.path: search.Route | None = None
         self.targets: dict[str, tuple[float, float]] = {}
         self.ready = False
+        self.status = 'planning'
+        self.cspace_pub = self.create_publisher(OccupancyGrid, '/hw02/cspace', INPUT_QOS)
+        self.roadmap_pub = self.create_publisher(MarkerArray, '/hw02/roadmap', INPUT_QOS)
+        self.path_pub = self.create_publisher(Path, '/hw02/planned_path', INPUT_QOS)
+        self.status_pub = self.create_publisher(String, '/hw02/planner_status', INPUT_QOS)
+        self.publish_outputs('planning')
         self.create_subscription(OccupancyGrid, '/map', self.on_map, INPUT_QOS)
         for label in ('start', 'goal'):
             self.create_subscription(
@@ -84,6 +98,24 @@ class PlannerInputs(Node):
         self.roadmap = None
         self.path = None
 
+    def publish_outputs(self, status: str) -> None:
+        """Publish one complete, reliable/transient-local planning snapshot."""
+        self.status = status
+        if status in ('planning', 'failed'):
+            try:
+                outputs.remove_figure(self.figure_path)
+            except (OSError, ValueError) as error:
+                self.get_logger().error(f'Cannot clear previous figure: {error}')
+                self.status = 'failed'
+                self.path = None
+        occupancy, markers, path = outputs.make_messages(
+            self.map_info, self.cspace, self.roadmap, self.path,
+            self.get_clock().now().to_msg())
+        self.cspace_pub.publish(occupancy)
+        self.roadmap_pub.publish(markers)
+        self.path_pub.publish(path)
+        self.status_pub.publish(String(data=self.status))
+
     def on_map(self, message: OccupancyGrid) -> None:
         """Clear an invalid map rather than retaining a previously accepted map."""
         previous = self.grid
@@ -95,7 +127,10 @@ class PlannerInputs(Node):
             self.cspace = None
             self.clear_plan()
             self.get_logger().error(f'Rejected map: {error}')
+            self.publish_outputs('failed')
             return
+        info_changed = self.map_info != message.info
+        self.map_info = deepcopy(message.info)
         if self.grid != previous or self.cspace is None:
             self.ready = False
             self.clear_plan()
@@ -103,6 +138,8 @@ class PlannerInputs(Node):
             self.get_logger().info(
                 f'Configuration space ready: radius={PLANNING_RADIUS:.2f} m; '
                 f'{self.cspace.data.count(0)} free cells. No motion.')
+        elif info_changed:
+            self.publish_outputs(self.status)
         self.check_ready()
 
     def on_target(self, label: str, message: PoseStamped) -> None:
@@ -114,6 +151,7 @@ class PlannerInputs(Node):
             self.ready = False
             self.clear_plan()
             self.get_logger().error(f'Rejected {label}: {error}')
+            self.publish_outputs('failed')
             return
         if self.targets[label] != previous:
             self.ready = False
@@ -124,8 +162,10 @@ class PlannerInputs(Node):
         """Check target bounds and footprint clearance whenever inputs change."""
         was_ready = self.ready
         self.ready = False
-        if self.cspace is None or any(name not in self.targets for name in ('start', 'goal')):
+        if (self.grid is None or self.cspace is None
+                or any(name not in self.targets for name in ('start', 'goal'))):
             self.clear_plan()
+            self.publish_outputs('failed' if self.status == 'failed' else 'planning')
             return
         try:
             cells = {name: self.cspace.world_to_grid(*xy) for name, xy in self.targets.items()}
@@ -135,9 +175,11 @@ class PlannerInputs(Node):
         except ValueError as error:
             self.clear_plan()
             self.get_logger().error(f'Inputs not ready: {error}')
+            self.publish_outputs('failed')
             return
         self.ready = True
         if not was_ready:
+            self.publish_outputs('planning')
             self.get_logger().info(
                 f'Inputs ready: map={self.cspace.width}x{self.cspace.height}, '
                 f'resolution={self.cspace.resolution:.3f} m; '
@@ -150,6 +192,7 @@ class PlannerInputs(Node):
                     **self.prm_settings)
             except ValueError as error:
                 self.get_logger().error(f'Roadmap construction failed: {error}')
+                self.publish_outputs('failed')
                 return
             self.get_logger().info(
                 f'Roadmap built: seed={self.prm_settings["seed"]}; '
@@ -161,6 +204,7 @@ class PlannerInputs(Node):
                 self.path = search.plan_route(self.cspace, self.roadmap)
             except ValueError as error:
                 self.get_logger().error(f'Route planning failed: {error}')
+                self.publish_outputs('failed')
                 return
             if self.path is None:
                 self.get_logger().warning(
@@ -170,6 +214,19 @@ class PlannerInputs(Node):
                     f'Path found: {len(self.path.points)} waypoints; '
                     f'length={self.path.length:.3f} m; search/validation='
                     f'{time.perf_counter() - started:.3f} s. No motion.')
+            status = 'no_path_found' if self.path is None else 'path_found'
+            try:
+                if self.figure_path:
+                    filename = outputs.save_figure(
+                        self.figure_path, self.grid, self.cspace, self.roadmap, self.path,
+                        self.prm_settings['seed'], status)
+                    self.get_logger().info(f'Figure saved: {filename}')
+            except (OSError, ValueError) as error:
+                self.path = None
+                self.get_logger().error(f'Figure export failed: {error}')
+                self.publish_outputs('failed')
+                return
+            self.publish_outputs(status)
 
 
 def main(args: list[str] | None = None) -> None:

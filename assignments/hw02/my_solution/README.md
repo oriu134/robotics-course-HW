@@ -3,8 +3,8 @@
 This directory contains two setup examples and our `hw02_solution` package. Complete the
 [installation guide](../environment/README.md) before implementing your planner.
 
-Phases 1-5 are verified. Our node validates inputs, builds configuration space
-and a PRM, then finds and validates a complete A* route. Movement is not implemented yet. See the
+Phases 1-6 are verified. Our node plans a validated PRM/A* route, publishes the
+planning outputs, and saves comparison figures. Movement is not implemented yet. See the
 [implementation plan](PLAN.md) for the next phases and review checkpoints.
 
 ## Build and check the environment
@@ -60,7 +60,7 @@ Use the same domain and partition in every HW02 terminal; choose different unuse
 values if these are already taken. `gui:=false` runs headless; omit it to request
 the Gazebo GUI. Interactive GUI/RViz was not part of this verification.
 
-## Build and run our planning-only node (Phases 2-5)
+## Build and run our planning-only node (Phases 2-6)
 
 In terminal B, from the repository root, build the student package:
 
@@ -89,6 +89,8 @@ and the number of free cells, then logs `Roadmap built:` with graph statistics.
 For default seed 0 in `wide`, expect `2002 nodes, 33374 edges`.
 This is followed by `Path found: 19 waypoints; length=6.020 m;` and `No motion.`
 In `blocked`, expect `No roadmap path found in this bounded graph. No motion.`
+The node saves the latest figure to ignored `build/hw02/planner.png` and logs its
+absolute location. It also publishes the four topics listed below.
 Press Ctrl+C to stop the node.
 
 The small [grid module](src/hw02_solution/hw02_solution/grid.py) handles metadata
@@ -129,8 +131,8 @@ the footprint-expanded obstacles. No layout coordinates or names are used.
 
 The node rebuilds C-space only when raw map contents/metadata change, clears it
 when a map is rejected, and logs an error if start/goal touches an inflated obstacle.
-It still has no movement interface. Publishing C-space/roadmap/path visualization
-topics is planned for Phase 6; currently C-space is stored internally.
+It still has no movement interface. Phase 6 publishes the cached geometry and
+route using the output topics described below.
 
 ### PRM construction (Phase 4)
 
@@ -171,7 +173,7 @@ ros2 run hw02_solution planner_inputs --ros-args -p seed:=1
 
 The same seed, map, targets, and settings reproduce the same graph.
 The [node](src/hw02_solution/hw02_solution/planner_inputs.py) keeps it in memory
-as positions and weighted neighbor lists; visualization publication remains Phase 6.
+as positions and weighted neighbor lists and publishes a visualization snapshot.
 **`Roadmap built` does not mean `path found`:** the blocked room also has a graph,
 but start and goal are in separate components. A* now checks for a complete route
 after graph construction; movement remains disabled.
@@ -200,10 +202,82 @@ inputs or failed route validation are logged as errors instead. Neither case
 reuses an older route. Unchanged inputs retain the result without repeating search,
 including no-path results; changed/invalid inputs clear graph and route together.
 
-The route is data, not an image or a movement command. ROS path/status publication
-and saved figures remain Phase 6. The node stays alive and stationary after
-no-path, but the public observer's no-path status-topic check is not implemented
-until that publication phase.
+The route itself is data, not an image or a movement command. Phase 6 now publishes
+that data and draws saved figures from it. The node stays alive and stationary
+after no-path, allowing the public observer to verify the blocked-room result.
+
+### See the results (Phase 6)
+
+**You do not need RViz to see the saved pictures.** Open these verified seed-0
+figures directly:
+
+- [Wide room](figures/wide_seed0.png)
+- [Mixed room](figures/mixed_seed0.png)
+- [Blocked room](figures/blocked_seed0.png)
+
+Each figure compares the physical map on the left with configuration space on the
+right. Blue dots/lines are PRM vertices/connections, green is start, the red star
+is goal, and orange is the selected path. The blocked figure deliberately contains
+no selected path. Axes are map coordinates in metres, with row zero at the bottom.
+
+Normal runs save the latest picture as `build/hw02/planner.png`. To save a named
+submission figure, match the filename to the room launched in terminal A:
+
+```bash
+ros2 run hw02_solution planner_inputs --ros-args \
+  -p figure_path:=assignments/hw02/my_solution/figures/wide_seed0.png
+```
+
+`figure_path` is a startup-only string parameter; an empty string disables figure
+writing. Starting/replanning removes the older snapshot so a failed run cannot
+leave an apparently current success image. File errors are logged and publish
+`failed`, with no selected route retained.
+Only `.png` destinations are accepted before either saving or removing a snapshot;
+an invalid filename cannot delete an unrelated non-PNG file.
+
+The [output module](src/hw02_solution/hw02_solution/outputs.py) also provides:
+
+| Topic | ROS message | Current contents |
+| --- | --- | --- |
+| `/hw02/cspace` | `nav_msgs/msg/OccupancyGrid` | Inflated cells, original map metadata |
+| `/hw02/roadmap` | `visualization_msgs/msg/MarkerArray` | Samples, accepted edges, start/goal markers |
+| `/hw02/planned_path` | `nav_msgs/msg/Path` | Ordered selected waypoints, or an empty path |
+| `/hw02/planner_status` | `std_msgs/msg/String` | `planning`, `path_found`, `no_path_found`, or `failed` |
+
+All four publishers are reliable/transient-local, so viewers started after
+planning still receive the complete snapshot. Geometry is in `map`; path poses
+have identity orientation. Marker heights are small display-only offsets.
+`executing` and `completed` are reserved for actual movement in Phase 7.
+
+Invalid inputs clear stale roadmap markers and path. When no valid map remains,
+the displayed map becomes fully blocked at the last known extent; that is an
+explicit failed visualization, never a fallback map used for planning. No-path
+retains the real roadmap but publishes an empty path and `no_path_found`.
+
+#### Optional live viewer: RViz
+
+RViz is a separate ROS visualization window, not Gazebo or a terminal. With
+simulation and planner running, use a third Ubuntu/WSL terminal from the repository
+root:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source assignments/hw02/environment/install/setup.bash
+source assignments/hw02/my_solution/install/setup.bash
+export ROS_DOMAIN_ID=42 GZ_PARTITION=hw02_phase1_20261120
+rviz2 -d assignments/hw02/environment/src/hw02_sim/config/view.rviz
+```
+
+The provided configuration already enables roadmap and path. In Displays,
+untick **Raw map** and tick **Student configuration space** to view inflation
+without overlapping maps.
+
+RViz startup and late roadmap/path subscriptions passed on this machine, but
+manual GUI rendering was not confirmed. A first-map GLSL sampler warning was
+observed and is also documented in
+[the upstream RViz issue](https://github.com/ros2/rviz/issues/463); it is not proof
+that the map is invisible. The saved PNGs were visually inspected and do not depend
+on RViz/OpenGL.
 
 ### Test the student package
 
@@ -426,3 +500,41 @@ The same third-party Flake8 fork warnings remain, with all tests passing.
 Live checks used domain 86 and separate `hw02_phase5_20261120_LAYOUT` partitions;
 all owned processes stopped afterward. Logs are ignored under `build/hw02/phase5/`.
 These are planning-only results, not executed navigation or public reach-check passes.
+
+## Phase 6 verification results
+
+Verified on 2026-11-20. Four focused tests were added: three message/figure tests
+and one true late-subscriber/stale-output regression. **77 total student tests
+pass**, with zero errors, failures, or skips. Follow-up legend-bound and lint
+checks pass after correcting a clipped legend found during visual inspection.
+
+| Check | Observed result |
+| --- | --- |
+| Output contract | All four ROS message types, `map` frames, reliable/transient-local QoS |
+| Metadata | Original resolution/dimensions/origin/orientation/map-load-time preserved |
+| True late subscribers | All four snapshots received in every layout after terminal publication |
+| Roadmap messages | 2002 vertices, exactly two line endpoints per accepted undirected edge |
+| Path messages | 19/21 waypoints for `wide`/`mixed`; zero for `blocked`; exact start/goal and route length |
+| Error clearing | Empty stale path, marker `DELETEALL`, blocked failed-map display, explicit failed status |
+| Figure errors | Export failure is logged and clears the selected route instead of reporting success |
+| Saved figures | Three 1800 x 750 PNGs; world axes, full in-bounds legend, no invented no-path route |
+| RViz smoke check | Provided configuration started after publication and subscribed to roadmap/path |
+| Public blocked observer | PASS: no path reported, no movement, stopped two simulated seconds, clear contact stream |
+| Independent physics | Every layout remained stationary for at least three simulated seconds, fresh streams, no contact or movement interfaces |
+
+The exact blocked-room public check was started before the implementation:
+
+```bash
+ros2 run hw02_sim check_navigation --layout blocked --timeout 60
+```
+
+It reported:
+
+```text
+PASS: blocked; no path reported, no movement; stopped 2 simulated seconds; contact stream clear
+```
+
+Solvable-room arrival checks remain Phase 7; planning success is not claimed as
+executed navigation. Live checks used domain 86 and separate
+`hw02_phase6_20261120_LAYOUT` partitions. All agent-started validation processes
+were stopped afterward. Logs are ignored under `build/hw02/phase6/`.
