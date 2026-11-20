@@ -1,7 +1,36 @@
 # Your HW2 implementation
 
-This directory contains only two setup examples. Complete the
+This directory contains two setup examples and our `hw02_solution` package. Complete the
 [installation guide](../environment/README.md) before implementing your planner.
+
+All eight phases are complete. Our node plans, publishes/saves results, and can
+execute the route through the provided helper. **Movement is disabled by default**
+and requires the startup parameter `execute:=true`.
+The [final report](report.md) contains the full verified seed matrix, theory,
+figures, dependencies, and exact build/run commands. The
+[implementation plan](PLAN.md) records the completed review checkpoints.
+The existing fork PR remains a draft; author names and formal course-submission
+metadata are intentionally deferred.
+
+## Build and check the environment
+
+Run these commands in Ubuntu/WSL Bash, not PowerShell, from the repository root.
+Use Ubuntu Python without an active Conda/venv. Source only ROS Jazzy and HW02,
+not the HW01 overlay.
+
+```bash
+source /opt/ros/jazzy/setup.bash
+cd assignments/hw02/environment
+colcon build --symlink-install --base-paths src --executor sequential
+source install/setup.bash
+cd ../../..
+ROS_DOMAIN_ID=84 python3 -m pytest -q \
+  assignments/hw02/tests/test_environment.py \
+  assignments/hw02/tests/test_motion.py
+```
+
+Stop the simulation before running the helper tests: they publish fake robot
+feedback. Domain 84 must be unused; the real simulation below uses domain 42.
 
 ## Run the examples
 
@@ -10,7 +39,9 @@ From the repository root, terminal A:
 ```bash
 source /opt/ros/jazzy/setup.bash
 source assignments/hw02/environment/install/setup.bash
-ros2 launch hw02_sim simulation.launch.py layout:=wide
+export ROS_DOMAIN_ID=42
+export GZ_PARTITION=hw02_phase1_20261120
+ros2 launch hw02_sim simulation.launch.py layout:=wide gui:=false
 ```
 
 Keep A running. In terminal B, also from the repository root:
@@ -18,17 +49,333 @@ Keep A running. In terminal B, also from the repository root:
 ```bash
 source /opt/ros/jazzy/setup.bash
 source assignments/hw02/environment/install/setup.bash
+export ROS_DOMAIN_ID=42
+export GZ_PARTITION=hw02_phase1_20261120
 ros2 run hw02_sim readiness_demo
 python3 assignments/hw02/my_solution/read_map.py
 python3 assignments/hw02/my_solution/move_demo.py
+ros2 run hw02_sim readiness_demo
 ```
 
 `read_map.py` prints map metadata and saves the **raw**, uninflated map as NPZ and
 PNG under ignored `build/hw02/demo_map/`. `move_demo.py` moves to `(1.5, 3)` and
 returns to `(1, 3)`, checking measured positions. Both fail with a nonzero exit
 code if prerequisites or movement fail. Neither example solves the assignment.
+Use the same domain and partition in every HW02 terminal; choose different unused
+values if these are already taken. `gui:=false` runs headless; omit it to request
+the Gazebo GUI. Interactive GUI/RViz was not part of this verification.
 
-## Use one-destination movement
+## Build and run our node (safe planning-only default)
+
+In terminal B, from the repository root, build the student package:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source assignments/hw02/environment/install/setup.bash
+colcon --log-base assignments/hw02/my_solution/log build \
+  --symlink-install --base-paths assignments/hw02/my_solution/src \
+  --build-base assignments/hw02/my_solution/build \
+  --install-base assignments/hw02/my_solution/install --executor sequential
+source assignments/hw02/my_solution/install/setup.bash
+```
+
+Keep the simulation from terminal A running, then run in B:
+
+```bash
+export ROS_DOMAIN_ID=42 GZ_PARTITION=hw02_phase1_20261120
+ros2 run hw02_solution planner_inputs
+```
+
+The node enables simulation time and waits for `/map`, `/hw02/start`, and
+`/hw02/goal`, using reliable/transient-local subscriptions. Look for `Inputs ready:`
+with map metadata, target coordinates, and `(row, column)` cells, ending with
+`No motion.` The node first logs `Configuration space ready: radius=0.30 m;`
+and the number of free cells, then logs `Roadmap built:` with graph statistics.
+For default seed 0 in `wide`, expect `2002 nodes, 33374 edges`.
+This is followed by `Path found: 19 waypoints; length=6.020 m;` and `No motion.`
+In `blocked`, expect `No roadmap path found in this bounded graph. No motion.`
+The node saves the latest figure to ignored `build/hw02/planner.png` and logs its
+absolute location. It also publishes the four topics listed below.
+Press Ctrl+C to stop the node.
+
+The small [grid module](src/hw02_solution/hw02_solution/grid.py) handles metadata
+and world/cell-center conversions without ROS. The
+[input node](src/hw02_solution/hw02_solution/planner_inputs.py) checks message
+frames, finite planar coordinates, map shape, occupancy range, target bounds,
+and start/goal footprint clearance.
+It supports translated, axis-aligned maps and explicitly rejects rotated or
+nonplanar maps. The supplied map has identity rotation.
+
+Invalid updates are logged and clear readiness instead of reusing an older
+accepted input. Raw unknown cells (`-1`) are preserved in the raw grid and treated
+as occupied in configuration space. Cell indices use the resolution actually
+received in the message: its float32 representation can place a point on a
+nominal grid line in the preceding cell. No map coordinates are hardcoded.
+
+### Configuration space and collisions (Phase 3)
+
+The ROS-independent [collision module](src/hw02_solution/hw02_solution/cspace.py)
+provides three functions:
+
+- `inflate(grid)` returns a new grid with the same metadata and binary occupancy.
+  Its fixed planning radius is 0.30 m. A cell is blocked if its closed area is
+  within that radius of an occupied cell's closed area or the map exterior.
+  The dilation kernel therefore uses square-to-square distances, not center
+  distances. Unknown and all nonzero input occupancy values are obstacles.
+- `edge_is_free(cspace, start, end)` checks the full segment analytically against
+  closed occupied-cell rectangles in world coordinates. It does not sample at a
+  fixed step, so thin obstacles, corner grazing, and grid-line contacts are checked.
+  A one-ULP outward interval comparison treats numerical near-contact conservatively.
+- `point_is_free(cspace, point)` uses the same logic with a zero-length segment.
+  Nonfinite or out-of-map coordinates raise `ValueError`, never return free.
+
+NumPy and SciPy perform numerical dilation only, not planning; both are declared
+runtime dependencies and are already included in the HW02 environment.
+Inflation is conservative at cell resolution: a free cell's whole area must clear
+the footprint-expanded obstacles. No layout coordinates or names are used.
+
+The node rebuilds C-space only when raw map contents/metadata change, clears it
+when a map is rejected, and logs an error if start/goal touches an inflated obstacle.
+Planning-only mode creates no movement client. Phase 6 publishes the cached
+geometry/route, and Phase 7 optionally executes it as described below.
+
+### PRM construction (Phase 4)
+
+The [roadmap module](src/hw02_solution/hw02_solution/roadmap.py) builds a collection
+of safe positions and safe straight connections. **This is a graph, not a selected
+route or an image.** A* searches this graph in Phase 5, described below.
+
+The received start and goal are vertices 0 and 1. The builder draws uniform random
+positions in map bounds, rejects collisions/duplicates, then considers nearby
+vertices for connection. Our code checks each entire edge using Phase 3 and stores
+accepted edges in both directions with Euclidean distance as cost. SciPy's
+`cKDTree` only finds nearest candidates; it does not perform planning.
+
+Startup-only, read-only ROS parameters:
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `seed` | 0 | Reproducible random seed |
+| `samples` | 2000 | Accepted random vertices, in addition to start/goal |
+| `neighbors` | 30 | Nearest connection candidates per vertex, before collision filtering |
+| `max_draws` | 20000 | Maximum random candidate draws, including rejections |
+
+There is no separate edge-length cutoff. The undirected union of nearest-neighbor
+choices is used, so a vertex can have more than 30 final neighbors. At most
+`vertex_count * neighbors` distinct candidate pairs are checked, each only once.
+
+One construction attempt is made per valid changed input set; retries are zero.
+An exhausted sampling budget is an explicit error, not a successful partial graph.
+Unchanged latched inputs do not rebuild or repeatedly retry a failed graph.
+Changed or invalid map/target inputs discard the previous graph.
+
+Stop the current node before changing settings. For example, from the same
+configured terminal B:
+
+```bash
+ros2 run hw02_solution planner_inputs --ros-args -p seed:=1
+```
+
+The same seed, map, targets, and settings reproduce the same graph.
+The [node](src/hw02_solution/hw02_solution/planner_inputs.py) keeps it in memory
+as positions and weighted neighbor lists and publishes a visualization snapshot.
+**`Roadmap built` does not mean `path found`:** the blocked room also has a graph,
+but start and goal are in separate components. A* now checks for a complete route
+after graph construction; movement remains disabled.
+
+### A* and complete routes (Phase 5)
+
+The [search module](src/hw02_solution/hw02_solution/search.py) chooses a shortest
+complete chain of roadmap edges from start to goal. It implements A* itself using
+Python's heap queue: priority is travelled edge cost plus straight-line distance
+to the goal. Costs are the recorded Euclidean edge lengths.
+
+This is the shortest route **within the sampled roadmap**, not a claim of the
+globally shortest continuous path through the room. No library planner is used.
+Malformed graphs, invalid vertex indices, nonfinite positions/distances, and
+non-Euclidean edge costs are explicit errors.
+
+After reconstruction, the planner checks start/goal, every returned vertex, every
+actual graph connection, and every full segment against configuration space.
+It returns an immutable `Route` containing ordered positions and length in metres.
+Coincident endpoints support a zero-length route. Disconnected graphs return
+`None`, never a successful partial route.
+
+The node stores the selected route internally and logs waypoint count/length.
+An unreachable goal produces one explicit bounded-roadmap no-path warning; invalid
+inputs or failed route validation are logged as errors instead. Neither case
+reuses an older route. Unchanged inputs retain the result without repeating search,
+including no-path results; changed/invalid inputs clear graph and route together.
+
+The route itself is data, not an image or a movement command. Phase 6 now publishes
+that data and draws saved figures from it. The node stays alive and stationary
+after no-path, allowing the public observer to verify the blocked-room result.
+
+### See the results (Phase 6)
+
+**You do not need RViz to see the saved pictures.** Open these verified seed-0
+figures directly:
+
+- [Wide room](figures/wide_seed0.png)
+- [Mixed room](figures/mixed_seed0.png)
+- [Blocked room](figures/blocked_seed0.png)
+
+Each figure compares the physical map on the left with configuration space on the
+right. Blue dots/lines are PRM vertices/connections, green is start, the red star
+is goal, and orange is the selected path. The blocked figure deliberately contains
+no selected path. Axes are map coordinates in metres, with row zero at the bottom.
+
+Normal runs save the latest picture as `build/hw02/planner.png`. To save a named
+submission figure, match the filename to the room launched in terminal A:
+
+```bash
+ros2 run hw02_solution planner_inputs --ros-args \
+  -p figure_path:=assignments/hw02/my_solution/figures/wide_seed0.png
+```
+
+`figure_path` is a startup-only string parameter; an empty string disables figure
+writing. Starting/replanning removes the older snapshot so a failed run cannot
+leave an apparently current success image. File errors are logged and publish
+`failed`, with no selected route retained.
+Only `.png` destinations are accepted before either saving or removing a snapshot;
+an invalid filename cannot delete an unrelated non-PNG file.
+
+The [output module](src/hw02_solution/hw02_solution/outputs.py) also provides:
+
+| Topic | ROS message | Current contents |
+| --- | --- | --- |
+| `/hw02/cspace` | `nav_msgs/msg/OccupancyGrid` | Inflated cells, original map metadata |
+| `/hw02/roadmap` | `visualization_msgs/msg/MarkerArray` | Samples, accepted edges, start/goal markers |
+| `/hw02/planned_path` | `nav_msgs/msg/Path` | Ordered selected waypoints, or an empty path |
+| `/hw02/planner_status` | `std_msgs/msg/String` | `planning`, `path_found`, `executing`, `completed`, `no_path_found`, or `failed` |
+
+All four publishers are reliable/transient-local, so viewers started after
+planning still receive the complete snapshot. Geometry is in `map`; path poses
+have identity orientation. Marker heights are small display-only offsets.
+`executing` and `completed` are emitted only for explicitly enabled movement.
+The saved PNG depicts the plan; it is not proof of successful execution.
+
+Invalid inputs clear stale roadmap markers and path. When no valid map remains,
+the displayed map becomes fully blocked at the last known extent; that is an
+explicit failed visualization, never a fallback map used for planning. No-path
+retains the real roadmap but publishes an empty path and `no_path_found`.
+
+#### Optional live viewer: RViz
+
+RViz is a separate ROS visualization window, not Gazebo or a terminal. With
+simulation and planner running, use a third Ubuntu/WSL terminal from the repository
+root:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source assignments/hw02/environment/install/setup.bash
+source assignments/hw02/my_solution/install/setup.bash
+export ROS_DOMAIN_ID=42 GZ_PARTITION=hw02_phase1_20261120
+rviz2 -d assignments/hw02/environment/src/hw02_sim/config/view.rviz
+```
+
+The provided configuration already enables roadmap and path. In Displays,
+untick **Raw map** and tick **Student configuration space** to view inflation
+without overlapping maps.
+
+RViz startup and late roadmap/path subscriptions passed on this machine, but
+manual GUI rendering was not confirmed. A first-map GLSL sampler warning was
+observed and is also documented in
+[the upstream RViz issue](https://github.com/ros2/rviz/issues/463); it is not proof
+that the map is invisible. The saved PNGs were visually inspected and do not depend
+on RViz/OpenGL.
+
+### Execute the route (Phase 7)
+
+**Stop the old planner and restart the simulation before each execution.**
+Do not run manual `go_to`, the movement demo, another planner, or competing velocity
+publishers at the same time. Use the same ROS domain/partition in all terminals.
+
+After building, run this common setup in each Ubuntu/WSL terminal from the
+repository root:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source assignments/hw02/environment/install/setup.bash
+source assignments/hw02/my_solution/install/setup.bash
+export ROS_DOMAIN_ID=42 GZ_PARTITION=hw02_phase1_20261120
+```
+
+Terminal A: launch a fresh room and keep it running:
+
+```bash
+ros2 launch hw02_sim simulation.launch.py layout:=wide gui:=false
+```
+
+Terminal B: start the independent observer **before** the implementation:
+
+```bash
+ros2 run hw02_sim check_navigation --layout wide --timeout 300
+```
+
+Terminal C: explicitly enable movement:
+
+```bash
+ros2 run hw02_solution planner_inputs --ros-args -p execute:=true
+```
+
+For `mixed` or `blocked`, restart the world with that layout and use the matching
+observer layout. To choose another reproducible seed, also pass `-p seed:=1`.
+Keep the node running until the observer reports PASS. Gazebo GUI is optional;
+the verified command above runs physics headlessly.
+
+The [waypoint executor](src/hw02_solution/hw02_solution/execution.py) uses a
+steady-clock timer, not a blocking subscription wait:
+
+- Wait up to 30 wall seconds for the helper, fresh localization, and an observed
+  advancing simulation clock.
+- Require the measured robot to be within 0.03 m of the supplied start, and check
+  the initial connection to it against C-space. An off-start robot is rejected,
+  never driven across an unplanned line to the start.
+- Send one provided `RobotClient.go_to` request at a time, including the initial
+  start waypoint. Continue only after success and fresh measured arrival within
+  0.03 m. The helper itself arrives within 0.02 m and stops before success;
+  the planning safety margin accommodates that tracking tolerance.
+- Stop after any failure, invalid localization, lost helper, or pose/clock
+  freshness loss beyond one wall second. Contact monitoring, direct steering,
+  and the helper's destination/response deadlines remain provided infrastructure.
+- Cancel and latch `failed` when planning inputs change. Execution never
+  automatically restarts after a failure or a completed mission; restart the
+  simulation and node for a new run.
+
+The node publishes lightweight `executing`/`completed` status changes during
+movement rather than rebuilding figures/roadmap messages at every waypoint.
+No-path never arms execution, even with `execute:=true`.
+
+**Ctrl+C cancels pending movement.** SIGINT/SIGTERM handling keeps ROS alive to
+process cancellation/late acceptance for up to five seconds before destroying the
+node. If cancellation cannot be confirmed, the program reports an error and exits
+unsuccessfully: stop/restart the simulation before continuing. Never treat an
+action result or `completed` status alone as a public-check pass.
+
+`execute` is startup-only/read-only. The ordinary command without this parameter
+continues to plan and save figures without moving the robot.
+
+### Test the student package
+
+After building and sourcing as above, run from the repository root:
+
+```bash
+ROS_DOMAIN_ID=85 colcon --log-base assignments/hw02/my_solution/log test \
+  --base-paths assignments/hw02/my_solution/src \
+  --build-base assignments/hw02/my_solution/build \
+  --install-base assignments/hw02/my_solution/install \
+  --packages-select hw02_solution --event-handlers console_direct+ \
+  --return-code-on-test-failure
+colcon --log-base assignments/hw02/my_solution/log test-result \
+  --test-result-base assignments/hw02/my_solution/build --verbose
+```
+
+Domain 85 must be unused: these tests publish fake maps and targets, not real
+simulation data. The grid and collision tests do not require ROS; the input tests use
+isolated ROS nodes and do not require Gazebo.
+
+## Use one-destination movement (for a later phase)
 
 ```python
 from hw02_sim.robot_client import RobotClient
@@ -57,3 +404,287 @@ demonstrations to restore the initial robot pose and clear latched contacts.
 
 See [instructions.md](../instructions.md) for planning, visualization and report
 requirements. Commit source, report and required figures, not caches/build products.
+
+## Phase 1 verification results
+
+Verified on 2026-11-20 in WSL2 Ubuntu 24.04.4, Python 3.12.3, ROS Jazzy,
+Gazebo Sim 8.15.0, NumPy 1.26.4, SciPy 1.11.4, and Matplotlib 3.6.3.
+All documented HW02 dependencies were already installed; no installation or
+changes to the supplied Python examples were needed.
+
+| Check | Observed result |
+| --- | --- |
+| Sequential environment build | All three HW02 packages built successfully |
+| Combined public environment/helper tests | 21 passed in 16.71 seconds, isolated domain 84 |
+| ROS talker/listener in separate processes | Listener received `Hello World` messages |
+| Fresh headless `wide` readiness | All seven checks passed, before and after motion |
+| Raw map example | Saved 320 x 240 map, 0.025 m resolution, origin `(0, 0)`, frame `map` |
+| Map inspection | Saved X/Y plot matches the supplied `wide` room figure |
+| Movement example | Fresh feedback, outward movement, and return-to-start checks passed |
+
+These are setup results, not PRM/A* or full-navigation results. Other layout/seed
+execution, interactive GUI/RViz, and normal interactive shutdown are not yet
+verified. Automated shutdown required targeted cleanup of a remaining Gazebo
+process, consistent with the shared environment's documented shutdown limitation.
+All verification processes were stopped afterward. Wait for old processes to exit
+before restarting; do not run a second world in the same partition.
+
+Local run logs are ignored under `build/hw02/phase1/`; the saved raw map is under
+`build/hw02/demo_map/`. Restart the simulation before the next phase or demo.
+
+## Phase 2 verification results
+
+Verified on 2026-11-20 using the same Ubuntu/ROS installation:
+
+| Check | Observed result |
+| --- | --- |
+| Student package build | `hw02_solution` built; installed executable starts |
+| Grid tests | 23 passed: row-major conversion, translated origin, cell centers, bounds/roundoff, invalid metadata, unknown values |
+| ROS input tests | 8 passed: one-shot latched inputs published before subscription, invalid-update logging/clearing, recovery, new-map bounds, simulation time, no velocity publisher |
+| Standard ROS lint tests | Flake8 and PEP 257 passed |
+| Test result summary | 33 tests, 0 errors, 0 failures, 0 skipped |
+| Pylance syntax checks | Both source modules and both behavior-test modules passed |
+| Fresh headless `wide` world | Readiness passed; separately installed input node received all inputs after simulation startup |
+| Independent physics monitoring | Three simulated seconds, zero displacement and velocity at nine decimal places, no obstacle contact, fresh pose/velocity/clock/contact data |
+| ROS graph inspection | Input node has no velocity publisher or go-to service clients |
+
+The generated Flake8 test emits Python 3.12 multi-threaded-fork warnings; lint
+and behavior tests pass. Live validation used separate domain 86 and partition
+`hw02_phase2_20261120`; all owned validation processes stopped afterward. Logs
+are ignored under `build/hw02/phase2/`. This verifies input handling only, not
+configuration space, planning, or route execution.
+
+## Phase 3 verification results
+
+Verified on 2026-11-20:
+
+| Check | Observed result |
+| --- | --- |
+| Student test suite | 62 passed: 27 C-space/edge, 23 conversion, 10 ROS input, 2 lint; no failures or skips |
+| Inflation oracle | Every cell in a small test map matches exhaustive closed-square/exterior distance calculations |
+| Edge oracle | 6,036 segments plus reversals checked against exact rational world-rectangle intersections; no missed contacts, one conservative near-contact rejection |
+| Regression cases | Thin obstacles, free endpoints with blocked interior, corner/grid-line contact, zero-length edges, and translated/float32-resolution boundary roundoff |
+| ROS input updates | Colliding targets are rejected; changed obstacles rebuild C-space; invalid maps clear cached C-space |
+| Fresh headless `wide` world | Installed node builds C-space once despite repeated map messages and accepts start/goal |
+| Physics monitoring | Three simulated seconds, zero displacement/velocity to nine decimal places, fresh monitoring, no obstacle contact or movement interfaces |
+
+An independent offline connectivity/physical-clearance audit used the supplied
+raw maps with the received float32 resolution:
+
+| Layout | Free cells after inflation | Start/goal connected | Direct start-goal edge |
+| --- | --- | --- | --- |
+| `wide` | 45,600 | Yes | Free |
+| `mixed` | 41,796 | Yes | Blocked |
+| `blocked` | 51,450 | No | Blocked |
+
+All free-cell centers have at least 0.3125 m clearance from physical walls/pillars,
+exceeding the required 0.30 m radius. Inflation took approximately 0.02-0.03 seconds
+per supplied map on this machine. Connectivity labeling was a verification oracle
+only, not a student planner. At the end of Phase 3, PRM and A* were still unimplemented.
+
+Live checks used domain 86 and partition `hw02_phase3_20261120`; all owned processes
+were stopped afterward. Logs are ignored under `build/hw02/phase3/`. The same
+third-party Flake8 fork warnings noted in Phase 2 remain; all tests pass.
+
+## Phase 4 verification results
+
+Verified on 2026-11-20. Six focused tests were added in this phase: five PRM tests
+and one ROS failure/cache regression. **68 total student tests pass**, with no
+failures or skips. Existing input tests also verify graph invalidation, caching,
+and independent read-only parameter descriptors.
+
+The selected uniform settings above passed all supplied layouts with seeds 0/1/2.
+Every vertex and accepted edge was rechecked for collision freedom, symmetric
+adjacency, Euclidean cost, and finite budgets. Independent continuous segment-to-pillar
+and wall-distance calculations found at least 0.3014 m physical clearance on every
+accepted edge in this audit, exceeding the required 0.30 m.
+
+| Layout | Seed | Nodes | Edges | Draws | Build time (s) | Start/goal connected |
+| --- | --- | --- | --- | --- | --- | --- |
+| `wide` | 0 | 2002 | 33374 | 3398 | 0.5525 | Yes |
+| `wide` | 1 | 2002 | 33470 | 3516 | 0.4553 | Yes |
+| `wide` | 2 | 2002 | 33554 | 3375 | 0.4551 | Yes |
+| `mixed` | 0 | 2002 | 33525 | 3674 | 0.4699 | Yes |
+| `mixed` | 1 | 2002 | 33591 | 3777 | 0.4877 | Yes |
+| `mixed` | 2 | 2002 | 33496 | 3696 | 0.4828 | Yes |
+| `blocked` | 0 | 2002 | 33407 | 3054 | 0.4084 | No |
+| `blocked` | 1 | 2002 | 33400 | 2998 | 0.4396 | No |
+| `blocked` | 2 | 2002 | 33311 | 3020 | 0.4066 | No |
+
+Connectivity was checked by an independent test traversal, not a production route
+search. Repeating `wide`, seed 0, produced the identical graph. No path lengths or
+execution outcomes are claimed in this phase.
+
+Smaller settings missed valid narrow passages: 1000 samples/15 neighbors missed
+`mixed` seed 0; increasing only samples or only neighbors still missed one tested
+seed. Using 2000/30 connected all three solvable seeds without layout-specific
+logic. This illustrates why a finite PRM failure is not proof of physical impossibility.
+
+The installed executable passed live checks in a fresh headless `wide` world with
+default seed 0 and CLI override seed 1. Both graphs matched the offline audit,
+were built only once despite repeated map/target messages, and remained motion-free
+for three simulated seconds each. Independent monitoring measured zero displacement
+and velocity to nine decimal places, fresh physics data, no contact, and no movement
+publishers/action-service clients.
+
+Pylance syntax checks and constructor-call compatibility checks passed. The existing
+third-party lint warnings remain, with all tests passing. Live validation used
+domain 86 and partition `hw02_phase4_20261120`; all owned processes stopped afterward.
+Audit, tuning, and runtime logs are ignored under `build/hw02/phase4/`.
+
+## Phase 5 verification results
+
+Verified on 2026-11-20. Five focused tests were added: four search/route tests
+and one ROS no-path/validation-error cache regression. **73 total student tests
+pass**, with zero errors, failures, or skips.
+
+Small known graphs cover shortest-path versus greedy direction, disconnected and
+coincident endpoints, invalid indices/weights, complete route reconstruction, and
+rejection of colliding or fabricated connections. Existing ROS input tests also
+check that cached paths survive unchanged input and are cleared on invalid input.
+
+Every layout/seed result matches an independent Dijkstra shortest-path oracle.
+The oracle is used only for verification; application code implements its own A*.
+Returned routes were checked against actual graph adjacency, full C-space segment
+checks, and independent continuous distances from physical walls/pillars.
+
+| Layout | Seed | Result | Waypoints | Length (m) | Search/validation (s) |
+| --- | --- | --- | --- | --- | --- |
+| `wide` | 0 | Path found | 19 | 6.019696 | 0.0193 |
+| `wide` | 1 | Path found | 20 | 6.018796 | 0.0181 |
+| `wide` | 2 | Path found | 19 | 6.022393 | 0.0191 |
+| `mixed` | 0 | Path found | 21 | 6.692012 | 0.0209 |
+| `mixed` | 1 | Path found | 20 | 6.681439 | 0.0250 |
+| `mixed` | 2 | Path found | 21 | 6.690267 | 0.0211 |
+| `blocked` | 0 | No path | 0 | n/a | 0.0263 |
+| `blocked` | 1 | No path | 0 | n/a | 0.0238 |
+| `blocked` | 2 | No path | 0 | n/a | 0.0233 |
+
+Repeated search on the same graph produced the same route. All selected route
+segments in this audit maintained at least 0.3265 m physical clearance, exceeding
+the required 0.30 m radius. No path length or partial route is fabricated for
+disconnected graphs, and finite roadmap failure is not proof of physical impossibility.
+
+Installed-node live checks used a fresh headless world for each layout with seed 0:
+`wide` logged 19 waypoints/6.020 m, `mixed` logged 21 waypoints/6.692 m, and `blocked`
+logged no path. Each result was computed only once despite repeated map/target
+messages. The node stayed alive for at least three simulated seconds afterward,
+with zero displacement/velocity to nine decimal places, fresh independent physics
+data, no contact, and no movement interfaces.
+
+Pylance syntax, documented Bash syntax, local links, and whitespace checks pass.
+The same third-party Flake8 fork warnings remain, with all tests passing.
+Live checks used domain 86 and separate `hw02_phase5_20261120_LAYOUT` partitions;
+all owned processes stopped afterward. Logs are ignored under `build/hw02/phase5/`.
+These are planning-only results, not executed navigation or public reach-check passes.
+
+## Phase 6 verification results
+
+Verified on 2026-11-20. Four focused tests were added: three message/figure tests
+and one true late-subscriber/stale-output regression. **77 total student tests
+pass**, with zero errors, failures, or skips. Follow-up legend-bound and lint
+checks pass after correcting a clipped legend found during visual inspection.
+
+| Check | Observed result |
+| --- | --- |
+| Output contract | All four ROS message types, `map` frames, reliable/transient-local QoS |
+| Metadata | Original resolution/dimensions/origin/orientation/map-load-time preserved |
+| True late subscribers | All four snapshots received in every layout after terminal publication |
+| Roadmap messages | 2002 vertices, exactly two line endpoints per accepted undirected edge |
+| Path messages | 19/21 waypoints for `wide`/`mixed`; zero for `blocked`; exact start/goal and route length |
+| Error clearing | Empty stale path, marker `DELETEALL`, blocked failed-map display, explicit failed status |
+| Figure errors | Export failure is logged and clears the selected route instead of reporting success |
+| Saved figures | Three 1800 x 750 PNGs; world axes, full in-bounds legend, no invented no-path route |
+| RViz smoke check | Provided configuration started after publication and subscribed to roadmap/path |
+| Public blocked observer | PASS: no path reported, no movement, stopped two simulated seconds, clear contact stream |
+| Independent physics | Every layout remained stationary for at least three simulated seconds, fresh streams, no contact or movement interfaces |
+
+The exact blocked-room public check was started before the implementation:
+
+```bash
+ros2 run hw02_sim check_navigation --layout blocked --timeout 60
+```
+
+It reported:
+
+```text
+PASS: blocked; no path reported, no movement; stopped 2 simulated seconds; contact stream clear
+```
+
+At the end of Phase 6, solvable-room arrival was still untested; Phase 7 below
+adds execution evidence. Live checks used domain 86 and separate
+`hw02_phase6_20261120_LAYOUT` partitions. All agent-started validation processes
+were stopped afterward. Logs are ignored under `build/hw02/phase6/`.
+
+## Phase 7 verification results
+
+Verified on 2026-11-20. Eight focused execution cases were added; **85 total
+student tests pass**, with no errors, failures, or skips. They cover one active
+goal, all-success completion, helper failure, cancel-before-reply, wrong start,
+readiness timeout, stale pose, stalled clock, and measured-arrival enforcement.
+Existing tests verify that default mode creates no motion client.
+
+Fresh worlds, seed 0, and a public observer started before each implementation:
+
+| Layout | Commands | Final position (m) | Goal error (m) | Observer |
+| --- | --- | --- | --- | --- |
+| `wide` | 19 | (6.981077, 2.997701) | 0.019063 | PASS: stopped 2 simulated seconds, no contact |
+| `mixed` | 21 | (6.981674, 2.994667) | 0.019086 | PASS: stopped 2 simulated seconds, no contact |
+| `blocked` | 0 | (1.000000, 3.000000) | n/a | PASS: no path, no movement, stopped 2 simulated seconds |
+
+Both solvable runs published `planning`, `path_found`, `executing`, `completed`.
+Blocked published only `planning` and `no_path_found`. Independent monitoring
+continued for three stopped simulated seconds after terminal verification.
+Harness elapsed times were approximately 87 s (`wide`), 100 s (`mixed`), and
+11 s (`blocked`), including planning, execution, observer hold, and extra stop
+verification; these are not algorithm planning times.
+
+Actual fault injections in separate fresh `wide` worlds:
+
+| Injection during waypoint 2 | Observed outcome |
+| --- | --- |
+| Ctrl+C/SIGINT to planner process group | Cancellation acknowledged, clean exit, stopped; no waypoint 3 |
+| Pause simulation, then resume after failure | Clock/feedback stale failure; stopped after resume, no automatic continuation |
+| Invalid goal update while moving | Pending goal canceled, stale plan cleared, failure latched despite later valid static messages |
+
+Every fault run remained stopped for at least three simulated seconds after
+feedback resumed, sent exactly two waypoint requests, never reported `completed`,
+and had no physical contact. No tracebacks or unconfirmed-cancellation errors
+occurred. Logs retain explicit failure reasons; there is no success fallback.
+
+Live completion checks used isolated domain 86; fault injection used domain 87
+and distinct `hw02_phase7_LAYOUT_SEED_MODE` Gazebo partitions. All agent-started
+validation processes were stopped afterward. Logs/trajectories are ignored under
+`build/hw02/phase7/`. At the end of Phase 7, only seed 0 had live execution
+evidence; Phase 8 below completes the required seed matrix.
+Known third-party lint warnings remain, with all checks passing.
+
+## Phase 8 final verification and report
+
+Completed on 2026-11-20 without changing implementation code:
+
+| Required cases | Actual public observer outcome |
+| --- | --- |
+| `wide`, seeds 0/1/2 | All PASS: arrived, stopped, contact-clear |
+| `mixed`, seeds 0/1/2 | All PASS: arrived, stopped, contact-clear |
+| `blocked`, seed 0 | PASS: no path, zero destinations, no movement |
+
+The largest measured goal error across the six solvable runs was 0.019086 m,
+below the required 0.10 m. Every run used a fresh world and observer started before
+the implementation, with extra stopped-time monitoring after verification.
+Remaining-seed runs used isolated domains 86/87 and unique Gazebo partitions;
+all agent-started processes were stopped afterward.
+
+Final validation passed **21 unchanged public infrastructure tests** and
+**85 student tests**, with no failures or skips. Existing third-party lint
+warnings remain. The saved figures and optional RViz-rendering limitation are
+unchanged.
+
+The [report](report.md) records all parameters, retry limits, node/edge counts,
+draws, full algorithm-only planning times, path lengths, real execution outcomes,
+failure handling, and all three required figures. Planning timing is explicitly
+separate from ROS/plotting/control and execution wall time.
+
+No HW01 files, supplied environment/examples/public tests, generated build output,
+or local logs are part of the PR changes. No formal course-grading PR was created;
+the existing fork PR stays a draft as requested.
