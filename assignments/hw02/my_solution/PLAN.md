@@ -1,10 +1,9 @@
 # HW02 implementation plan
 
-Phases 1 and 2 are complete: setup and the inputs-only package passed local tests
-and headless verification. See [commands and results](README.md).
-Input validation is implemented; configuration space, PRM, A*, and route execution
-are not. Implement and explain one phase at a time, verify it, commit it, then
-pause for review.
+Phases 1-3 are complete: setup, input validation, configuration space, and collision
+checks passed local tests and headless verification. See [commands and results](README.md).
+PRM, A*, and route execution are not implemented. Implement and explain one phase
+at a time, verify it, commit it, then pause for review.
 
 ## Scope and isolation
 
@@ -92,6 +91,9 @@ inputs and independent physics confirms three simulated seconds without movement
 unit tests cover conversion, map extents, and invalid inputs.
 
 ### Phase 3 - Configuration space and edge collision checks
+
+Completed on 2026-11-20: 62 tests pass, independent geometry/room audits pass,
+and live physics confirms C-space construction/caching without movement.
 
 - Inflate occupied/unknown cells and account for room boundaries using the full
   planning radius and cell area.

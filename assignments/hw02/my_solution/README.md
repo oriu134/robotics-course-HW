@@ -3,8 +3,8 @@
 This directory contains two setup examples and our `hw02_solution` package. Complete the
 [installation guide](../environment/README.md) before implementing your planner.
 
-Phases 1 and 2 are verified. Our node only receives and validates inputs; planning
-and movement are not implemented yet. See the
+Phases 1-3 are verified. Our node validates inputs, builds configuration space,
+and checks start/goal clearance. PRM, A*, and movement are not implemented yet. See the
 [implementation plan](PLAN.md) for the next phases and review checkpoints.
 
 ## Build and check the environment
@@ -60,7 +60,7 @@ Use the same domain and partition in every HW02 terminal; choose different unuse
 values if these are already taken. `gui:=false` runs headless; omit it to request
 the Gazebo GUI. Interactive GUI/RViz was not part of this verification.
 
-## Build and run our inputs-only node (Phase 2)
+## Build and run our geometry node (Phases 2-3)
 
 In terminal B, from the repository root, build the student package:
 
@@ -84,20 +84,49 @@ ros2 run hw02_solution planner_inputs
 The node enables simulation time and waits for `/map`, `/hw02/start`, and
 `/hw02/goal`, using reliable/transient-local subscriptions. Look for `Inputs ready:`
 with map metadata, target coordinates, and `(row, column)` cells, ending with
-`No motion.` Press Ctrl+C to stop the node.
+`No motion.` The node first logs `Configuration space ready: radius=0.30 m;`
+and the number of free cells. Press Ctrl+C to stop the node.
 
 The small [grid module](src/hw02_solution/hw02_solution/grid.py) handles metadata
 and world/cell-center conversions without ROS. The
 [input node](src/hw02_solution/hw02_solution/planner_inputs.py) checks message
-frames, finite planar coordinates, map shape, occupancy range, and target bounds.
+frames, finite planar coordinates, map shape, occupancy range, target bounds,
+and start/goal footprint clearance.
 It supports translated, axis-aligned maps and explicitly rejects rotated or
 nonplanar maps. The supplied map has identity rotation.
 
 Invalid updates are logged and clear readiness instead of reusing an older
-accepted input. Raw unknown cells (`-1`) are preserved; inflation and occupancy
-collision checks belong to Phase 3. Cell indices use the resolution actually
+accepted input. Raw unknown cells (`-1`) are preserved in the raw grid and treated
+as occupied in configuration space. Cell indices use the resolution actually
 received in the message: its float32 representation can place a point on a
 nominal grid line in the preceding cell. No map coordinates are hardcoded.
+
+### Configuration space and collisions (Phase 3)
+
+The ROS-independent [collision module](src/hw02_solution/hw02_solution/cspace.py)
+provides three functions:
+
+- `inflate(grid)` returns a new grid with the same metadata and binary occupancy.
+  Its fixed planning radius is 0.30 m. A cell is blocked if its closed area is
+  within that radius of an occupied cell's closed area or the map exterior.
+  The dilation kernel therefore uses square-to-square distances, not center
+  distances. Unknown and all nonzero input occupancy values are obstacles.
+- `edge_is_free(cspace, start, end)` checks the full segment analytically against
+  closed occupied-cell rectangles in world coordinates. It does not sample at a
+  fixed step, so thin obstacles, corner grazing, and grid-line contacts are checked.
+  A one-ULP outward interval comparison treats numerical near-contact conservatively.
+- `point_is_free(cspace, point)` uses the same logic with a zero-length segment.
+  Nonfinite or out-of-map coordinates raise `ValueError`, never return free.
+
+NumPy and SciPy perform numerical dilation only, not planning; both are declared
+runtime dependencies and are already included in the HW02 environment.
+Inflation is conservative at cell resolution: a free cell's whole area must clear
+the footprint-expanded obstacles. No layout coordinates or names are used.
+
+The node rebuilds C-space only when raw map contents/metadata change, clears it
+when a map is rejected, and logs an error if start/goal touches an inflated obstacle.
+It still has no movement interface. Publishing C-space/roadmap/path visualization
+topics is planned for Phase 6; currently C-space is stored internally.
 
 ### Test the student package
 
@@ -115,7 +144,7 @@ colcon --log-base assignments/hw02/my_solution/log test-result \
 ```
 
 Domain 85 must be unused: these tests publish fake maps and targets, not real
-simulation data. The core grid tests do not require ROS; the input tests use
+simulation data. The grid and collision tests do not require ROS; the input tests use
 isolated ROS nodes and do not require Gazebo.
 
 ## Use one-destination movement (for a later phase)
@@ -196,3 +225,35 @@ and behavior tests pass. Live validation used separate domain 86 and partition
 `hw02_phase2_20261120`; all owned validation processes stopped afterward. Logs
 are ignored under `build/hw02/phase2/`. This verifies input handling only, not
 configuration space, planning, or route execution.
+
+## Phase 3 verification results
+
+Verified on 2026-11-20:
+
+| Check | Observed result |
+| --- | --- |
+| Student test suite | 62 passed: 27 C-space/edge, 23 conversion, 10 ROS input, 2 lint; no failures or skips |
+| Inflation oracle | Every cell in a small test map matches exhaustive closed-square/exterior distance calculations |
+| Edge oracle | 6,036 segments plus reversals checked against exact rational world-rectangle intersections; no missed contacts, one conservative near-contact rejection |
+| Regression cases | Thin obstacles, free endpoints with blocked interior, corner/grid-line contact, zero-length edges, and translated/float32-resolution boundary roundoff |
+| ROS input updates | Colliding targets are rejected; changed obstacles rebuild C-space; invalid maps clear cached C-space |
+| Fresh headless `wide` world | Installed node builds C-space once despite repeated map messages and accepts start/goal |
+| Physics monitoring | Three simulated seconds, zero displacement/velocity to nine decimal places, fresh monitoring, no obstacle contact or movement interfaces |
+
+An independent offline connectivity/physical-clearance audit used the supplied
+raw maps with the received float32 resolution:
+
+| Layout | Free cells after inflation | Start/goal connected | Direct start-goal edge |
+| --- | --- | --- | --- |
+| `wide` | 45,600 | Yes | Free |
+| `mixed` | 41,796 | Yes | Blocked |
+| `blocked` | 51,450 | No | Blocked |
+
+All free-cell centers have at least 0.3125 m clearance from physical walls/pillars,
+exceeding the required 0.30 m radius. Inflation took approximately 0.02-0.03 seconds
+per supplied map on this machine. Connectivity labeling was a verification oracle
+only, not a student planner: PRM and A* remain unimplemented.
+
+Live checks used domain 86 and partition `hw02_phase3_20261120`; all owned processes
+were stopped afterward. Logs are ignored under `build/hw02/phase3/`. The same
+third-party Flake8 fork warnings noted in Phase 2 remain; all tests pass.

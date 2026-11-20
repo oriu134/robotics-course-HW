@@ -10,6 +10,7 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
+from .cspace import inflate, PLANNING_RADIUS, point_is_free
 from .grid import GridMap
 
 
@@ -54,6 +55,7 @@ class PlannerInputs(Node):
         super().__init__('planner_inputs')
         self.set_parameters([Parameter('use_sim_time', value=True)])
         self.grid: GridMap | None = None
+        self.cspace: GridMap | None = None
         self.targets: dict[str, tuple[float, float]] = {}
         self.ready = False
         self.create_subscription(OccupancyGrid, '/map', self.on_map, INPUT_QOS)
@@ -71,10 +73,15 @@ class PlannerInputs(Node):
             self.grid = read_grid(message)
         except ValueError as error:
             self.ready = False
+            self.cspace = None
             self.get_logger().error(f'Rejected map: {error}')
             return
-        if self.grid != previous:
+        if self.grid != previous or self.cspace is None:
             self.ready = False
+            self.cspace = inflate(self.grid)
+            self.get_logger().info(
+                f'Configuration space ready: radius={PLANNING_RADIUS:.2f} m; '
+                f'{self.cspace.data.count(0)} free cells. No motion.')
         self.check_ready()
 
     def on_target(self, label: str, message: PoseStamped) -> None:
@@ -91,21 +98,24 @@ class PlannerInputs(Node):
         self.check_ready()
 
     def check_ready(self) -> None:
-        """Check target bounds whenever any input changes."""
+        """Check target bounds and footprint clearance whenever inputs change."""
         was_ready = self.ready
         self.ready = False
-        if self.grid is None or any(name not in self.targets for name in ('start', 'goal')):
+        if self.cspace is None or any(name not in self.targets for name in ('start', 'goal')):
             return
         try:
-            cells = {name: self.grid.world_to_grid(*xy) for name, xy in self.targets.items()}
+            cells = {name: self.cspace.world_to_grid(*xy) for name, xy in self.targets.items()}
+            for name, xy in self.targets.items():
+                if not point_is_free(self.cspace, xy):
+                    raise ValueError(f'{name} touches a configuration-space obstacle')
         except ValueError as error:
             self.get_logger().error(f'Inputs not ready: {error}')
             return
         self.ready = True
         if not was_ready:
             self.get_logger().info(
-                f'Inputs ready: map={self.grid.width}x{self.grid.height}, '
-                f'resolution={self.grid.resolution:.3f} m; '
+                f'Inputs ready: map={self.cspace.width}x{self.cspace.height}, '
+                f'resolution={self.cspace.resolution:.3f} m; '
                 f'start={self.targets["start"]} cell={cells["start"]}; '
                 f'goal={self.targets["goal"]} cell={cells["goal"]}. No motion.')
 

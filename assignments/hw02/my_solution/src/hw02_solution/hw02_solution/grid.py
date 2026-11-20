@@ -6,7 +6,7 @@ import math
 
 @dataclass(frozen=True)
 class GridMap:
-    """Store an axis-aligned raw map in row-major order, without inflation."""
+    """Store an axis-aligned occupancy grid in row-major order."""
 
     width: int
     height: int

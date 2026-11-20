@@ -20,11 +20,11 @@ def map_message():
     message.info.resolution = 0.5
     message.info.origin.position.x, message.info.origin.position.y = 1.0, -2.0
     message.info.origin.orientation.w = 1.0
-    message.data = [0, 100, -1, 0] * 3
+    message.data = [0] * 12
     return message
 
 
-def target(x=1.25, y=-1.75):
+def target(x=1.75, y=-1.25):
     message = PoseStamped()
     message.header.frame_id = 'map'
     message.pose.position.x, message.pose.position.y = x, y
@@ -54,7 +54,7 @@ def rig():
     }
     publishers['map'].publish(map_message())
     publishers['start'].publish(target())
-    publishers['goal'].publish(target(2.75, -0.75))
+    publishers['goal'].publish(target(2.25, -1.25))
     node = PlannerInputs()
     executor = SingleThreadedExecutor()
     executor.add_node(source)
@@ -75,7 +75,8 @@ def test_late_subscriber_receives_all_inputs_without_motion(rig):
     assert node.get_parameter('use_sim_time').value is True
     assert node.grid is not None
     assert node.grid.data == tuple(map_message().data)
-    assert node.targets == {'start': (1.25, -1.75), 'goal': (2.75, -0.75)}
+    assert node.targets == {'start': (1.75, -1.25), 'goal': (2.25, -1.25)}
+    assert node.cspace is not None
     for subscription in node.subscriptions:
         if subscription.topic_name in ('/map', '/hw02/start', '/hw02/goal'):
             assert subscription.qos_profile.reliability == ReliabilityPolicy.RELIABLE
@@ -90,6 +91,7 @@ def test_invalid_map_is_logged_and_clears_previous_input(rig, capfd):
     publishers['map'].publish(invalid)
     spin_until(executor, lambda: node.grid is None)
     assert not node.ready
+    assert node.cspace is None
     captured = capfd.readouterr()
     assert 'Rejected map' in captured.out + captured.err
     publishers['map'].publish(map_message())
@@ -111,7 +113,7 @@ def test_invalid_goal_is_logged_and_never_reuses_previous_goal(rig, capfd, inval
     assert not node.ready
     captured = capfd.readouterr()
     assert 'Rejected goal' in captured.out + captured.err
-    publishers['goal'].publish(target(2.75, -0.75))
+    publishers['goal'].publish(target(2.25, -1.25))
     spin_until(executor, lambda: node.ready)
 
 
@@ -143,3 +145,23 @@ def test_nonfinite_target_height_is_rejected():
     message.pose.position.z = math.inf
     with pytest.raises(ValueError, match='finite'):
         read_target(message)
+
+
+def test_target_in_inflated_wall_margin_is_rejected(rig, capfd):
+    node, publishers, executor = rig
+    publishers['goal'].publish(target(1.25, -1.25))
+    spin_until(executor, lambda: not node.ready)
+    captured = capfd.readouterr()
+    assert 'goal touches a configuration-space obstacle' in captured.out + captured.err
+
+
+def test_changed_obstacles_rebuild_configuration_space(rig, capfd):
+    node, publishers, executor = rig
+    previous = node.cspace
+    changed = map_message()
+    changed.data[5] = 100
+    publishers['map'].publish(changed)
+    spin_until(executor, lambda: node.cspace != previous)
+    assert not node.ready
+    captured = capfd.readouterr()
+    assert 'touches a configuration-space obstacle' in captured.out + captured.err
