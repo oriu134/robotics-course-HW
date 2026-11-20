@@ -1,8 +1,9 @@
 # HW02 implementation plan
 
-Planning only. No planner implementation or runtime validation has been performed
-for this branch yet. Review this plan before starting Phase 1; implement and
-explain one phase at a time, then pause for review.
+Phase 1 is complete: the environment, public tests, and setup examples passed
+local headless verification. See [commands and results](README.md).
+No planner code has been implemented. Implement and explain one phase at a time,
+verify it, commit it, then pause for review.
 
 ## Scope and isolation
 
@@ -61,6 +62,8 @@ a documented, layout-independent bounded retry policy changes the budget.
 ## Phases and review checkpoints
 
 ### Phase 1 - Verify the HW02 environment
+
+Completed on 2026-11-20; interactive GUI/RViz remains unverified.
 
 - Verify Ubuntu 24.04, ROS Jazzy, Gazebo Harmonic, and the HW02 dependencies.
 - Build and source only the HW02 environment and ROS installation.
