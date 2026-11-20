@@ -1,7 +1,8 @@
-"""Plan a complete PRM/A* route without commanding robot movement."""
+"""Plan PRM/A* routes and optionally execute them with the provided helper."""
 
 from copy import deepcopy
 import math
+import signal
 import time
 
 from geometry_msgs.msg import PoseStamped
@@ -12,6 +13,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
 from visualization_msgs.msg import MarkerArray
 
@@ -19,6 +21,7 @@ from . import outputs
 from . import roadmap as prm
 from . import search
 from .cspace import inflate, PLANNING_RADIUS, point_is_free
+from .execution import WaypointExecutor
 from .grid import GridMap
 
 
@@ -57,7 +60,7 @@ def read_target(message: PoseStamped) -> tuple[float, float]:
 
 
 class PlannerInputs(Node):
-    """Plan once per valid changed input set, without requesting movement."""
+    """Plan on changed inputs, with one explicitly enabled execution per process."""
 
     def __init__(self, parameter_overrides: list[Parameter] | None = None) -> None:
         super().__init__('planner_inputs', parameter_overrides=parameter_overrides)
@@ -73,6 +76,10 @@ class PlannerInputs(Node):
         self.figure_path = self.declare_parameter(
             'figure_path', 'build/hw02/planner.png', ParameterDescriptor(read_only=True)
         ).get_parameter_value().string_value
+        self.execute_enabled = self.declare_parameter(
+            'execute', False, ParameterDescriptor(read_only=True)
+        ).get_parameter_value().bool_value
+        self.planning_note = 'Planning.' if self.execute_enabled else 'No motion.'
         self.grid: GridMap | None = None
         self.cspace: GridMap | None = None
         self.map_info: MapMetaData | None = None
@@ -85,18 +92,35 @@ class PlannerInputs(Node):
         self.roadmap_pub = self.create_publisher(MarkerArray, '/hw02/roadmap', INPUT_QOS)
         self.path_pub = self.create_publisher(Path, '/hw02/planned_path', INPUT_QOS)
         self.status_pub = self.create_publisher(String, '/hw02/planner_status', INPUT_QOS)
+        self.motion = (WaypointExecutor(self, self.on_motion_status)
+                       if self.execute_enabled else None)
         self.publish_outputs('planning')
         self.create_subscription(OccupancyGrid, '/map', self.on_map, INPUT_QOS)
         for label in ('start', 'goal'):
             self.create_subscription(
                 PoseStamped, f'/hw02/{label}',
                 lambda message, name=label: self.on_target(name, message), INPUT_QOS)
-        self.get_logger().info('Waiting for map, start and goal; no motion is enabled.')
+        mode = ('execution requested' if self.execute_enabled
+                else 'planning only; no motion enabled')
+        self.get_logger().info(f'Waiting for map, start and goal; {mode}.')
 
     def clear_plan(self) -> None:
         """Discard the roadmap and selected route together."""
         self.roadmap = None
         self.path = None
+        if self.motion is not None:
+            self.motion.cancel('Planning inputs changed; restart simulation and node')
+
+    def on_motion_status(self, status: str, message: str) -> None:
+        """Publish lightweight progress while keeping the executor responsive."""
+        if status == 'failed':
+            self.clear_plan()
+            self.get_logger().error(message)
+            self.publish_outputs('failed')
+        else:
+            self.status = status
+            self.status_pub.publish(String(data=status))
+            self.get_logger().info(message)
 
     def publish_outputs(self, status: str) -> None:
         """Publish one complete, reliable/transient-local planning snapshot."""
@@ -133,11 +157,12 @@ class PlannerInputs(Node):
         self.map_info = deepcopy(message.info)
         if self.grid != previous or self.cspace is None:
             self.ready = False
+            self.cspace = None
             self.clear_plan()
             self.cspace = inflate(self.grid)
             self.get_logger().info(
                 f'Configuration space ready: radius={PLANNING_RADIUS:.2f} m; '
-                f'{self.cspace.data.count(0)} free cells. No motion.')
+                f'{self.cspace.data.count(0)} free cells. {self.planning_note}')
         elif info_changed:
             self.publish_outputs(self.status)
         self.check_ready()
@@ -160,6 +185,10 @@ class PlannerInputs(Node):
 
     def check_ready(self) -> None:
         """Check target bounds and footprint clearance whenever inputs change."""
+        if self.motion is not None and self.motion.state == 'failed':
+            self.ready = False
+            self.publish_outputs('failed')
+            return
         was_ready = self.ready
         self.ready = False
         if (self.grid is None or self.cspace is None
@@ -184,7 +213,7 @@ class PlannerInputs(Node):
                 f'Inputs ready: map={self.cspace.width}x{self.cspace.height}, '
                 f'resolution={self.cspace.resolution:.3f} m; '
                 f'start={self.targets["start"]} cell={cells["start"]}; '
-                f'goal={self.targets["goal"]} cell={cells["goal"]}. No motion.')
+                f'goal={self.targets["goal"]} cell={cells["goal"]}. {self.planning_note}')
             started = time.perf_counter()
             try:
                 self.roadmap = prm.build_prm(
@@ -198,7 +227,7 @@ class PlannerInputs(Node):
                 f'Roadmap built: seed={self.prm_settings["seed"]}; '
                 f'{len(self.roadmap.points)} nodes, {self.roadmap.edge_count} edges; '
                 f'{self.roadmap.draws} draws, {self.roadmap.candidate_edges} candidate edges; '
-                f'{time.perf_counter() - started:.3f} s. No motion.')
+                f'{time.perf_counter() - started:.3f} s. {self.planning_note}')
             started = time.perf_counter()
             try:
                 self.path = search.plan_route(self.cspace, self.roadmap)
@@ -213,7 +242,7 @@ class PlannerInputs(Node):
                 self.get_logger().info(
                     f'Path found: {len(self.path.points)} waypoints; '
                     f'length={self.path.length:.3f} m; search/validation='
-                    f'{time.perf_counter() - started:.3f} s. No motion.')
+                    f'{time.perf_counter() - started:.3f} s. {self.planning_note}')
             status = 'no_path_found' if self.path is None else 'path_found'
             try:
                 if self.figure_path:
@@ -227,17 +256,42 @@ class PlannerInputs(Node):
                 self.publish_outputs('failed')
                 return
             self.publish_outputs(status)
+            if (self.motion is not None and self.path is not None
+                    and self.status == 'path_found'):
+                try:
+                    self.motion.start(self.path, self.cspace)
+                except ValueError as error:
+                    self.on_motion_status('failed', f'Cannot start execution: {error}')
 
 
 def main(args: list[str] | None = None) -> None:
-    """Spin the planning-only node until interrupted."""
-    rclpy.init(args=args)
+    """Keep ROS alive long enough to cancel accepted or pending movement on exit."""
+    def interrupt(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    for kind in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(kind, interrupt)
     node = PlannerInputs()
+    cancellation_failed = False
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        for kind in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(kind, signal.SIG_IGN)
+        if node.motion is not None:
+            node.motion.shutdown()
+            deadline = time.monotonic() + 5.0
+            while rclpy.ok() and node.motion.pending and time.monotonic() < deadline:
+                rclpy.spin_once(node, timeout_sec=0.05)
+            cancellation_failed = node.motion.pending
+            if cancellation_failed:
+                node.get_logger().error(
+                    'Cancellation not confirmed; stop/restart the simulation before continuing')
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+    if cancellation_failed:
+        raise RuntimeError('Movement cancellation was not confirmed')

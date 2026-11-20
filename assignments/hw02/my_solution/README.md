@@ -3,8 +3,10 @@
 This directory contains two setup examples and our `hw02_solution` package. Complete the
 [installation guide](../environment/README.md) before implementing your planner.
 
-Phases 1-6 are verified. Our node plans a validated PRM/A* route, publishes the
-planning outputs, and saves comparison figures. Movement is not implemented yet. See the
+Phases 1-7 are verified. Our node plans, publishes/saves results, and can execute
+the route through the provided helper. **Movement is disabled by default** and
+requires the startup parameter `execute:=true`. The full multi-seed execution
+matrix and final report remain Phase 8. See the
 [implementation plan](PLAN.md) for the next phases and review checkpoints.
 
 ## Build and check the environment
@@ -60,7 +62,7 @@ Use the same domain and partition in every HW02 terminal; choose different unuse
 values if these are already taken. `gui:=false` runs headless; omit it to request
 the Gazebo GUI. Interactive GUI/RViz was not part of this verification.
 
-## Build and run our planning-only node (Phases 2-6)
+## Build and run our node (safe planning-only default)
 
 In terminal B, from the repository root, build the student package:
 
@@ -131,8 +133,8 @@ the footprint-expanded obstacles. No layout coordinates or names are used.
 
 The node rebuilds C-space only when raw map contents/metadata change, clears it
 when a map is rejected, and logs an error if start/goal touches an inflated obstacle.
-It still has no movement interface. Phase 6 publishes the cached geometry and
-route using the output topics described below.
+Planning-only mode creates no movement client. Phase 6 publishes the cached
+geometry/route, and Phase 7 optionally executes it as described below.
 
 ### PRM construction (Phase 4)
 
@@ -242,12 +244,13 @@ The [output module](src/hw02_solution/hw02_solution/outputs.py) also provides:
 | `/hw02/cspace` | `nav_msgs/msg/OccupancyGrid` | Inflated cells, original map metadata |
 | `/hw02/roadmap` | `visualization_msgs/msg/MarkerArray` | Samples, accepted edges, start/goal markers |
 | `/hw02/planned_path` | `nav_msgs/msg/Path` | Ordered selected waypoints, or an empty path |
-| `/hw02/planner_status` | `std_msgs/msg/String` | `planning`, `path_found`, `no_path_found`, or `failed` |
+| `/hw02/planner_status` | `std_msgs/msg/String` | `planning`, `path_found`, `executing`, `completed`, `no_path_found`, or `failed` |
 
 All four publishers are reliable/transient-local, so viewers started after
 planning still receive the complete snapshot. Geometry is in `map`; path poses
 have identity orientation. Marker heights are small display-only offsets.
-`executing` and `completed` are reserved for actual movement in Phase 7.
+`executing` and `completed` are emitted only for explicitly enabled movement.
+The saved PNG depicts the plan; it is not proof of successful execution.
 
 Invalid inputs clear stale roadmap markers and path. When no valid map remains,
 the displayed map becomes fully blocked at the last known extent; that is an
@@ -278,6 +281,77 @@ observed and is also documented in
 [the upstream RViz issue](https://github.com/ros2/rviz/issues/463); it is not proof
 that the map is invisible. The saved PNGs were visually inspected and do not depend
 on RViz/OpenGL.
+
+### Execute the route (Phase 7)
+
+**Stop the old planner and restart the simulation before each execution.**
+Do not run manual `go_to`, the movement demo, another planner, or competing velocity
+publishers at the same time. Use the same ROS domain/partition in all terminals.
+
+After building, run this common setup in each Ubuntu/WSL terminal from the
+repository root:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source assignments/hw02/environment/install/setup.bash
+source assignments/hw02/my_solution/install/setup.bash
+export ROS_DOMAIN_ID=42 GZ_PARTITION=hw02_phase1_20261120
+```
+
+Terminal A: launch a fresh room and keep it running:
+
+```bash
+ros2 launch hw02_sim simulation.launch.py layout:=wide gui:=false
+```
+
+Terminal B: start the independent observer **before** the implementation:
+
+```bash
+ros2 run hw02_sim check_navigation --layout wide --timeout 300
+```
+
+Terminal C: explicitly enable movement:
+
+```bash
+ros2 run hw02_solution planner_inputs --ros-args -p execute:=true
+```
+
+For `mixed` or `blocked`, restart the world with that layout and use the matching
+observer layout. To choose another reproducible seed, also pass `-p seed:=1`.
+Keep the node running until the observer reports PASS. Gazebo GUI is optional;
+the verified command above runs physics headlessly.
+
+The [waypoint executor](src/hw02_solution/hw02_solution/execution.py) uses a
+steady-clock timer, not a blocking subscription wait:
+
+- Wait up to 30 wall seconds for the helper, fresh localization, and an observed
+  advancing simulation clock.
+- Require the measured robot to be within 0.03 m of the supplied start, and check
+  the initial connection to it against C-space. An off-start robot is rejected,
+  never driven across an unplanned line to the start.
+- Send one provided `RobotClient.go_to` request at a time, including the initial
+  start waypoint. Continue only after success and fresh measured arrival within
+  0.03 m. The helper itself arrives within 0.02 m and stops before success;
+  the planning safety margin accommodates that tracking tolerance.
+- Stop after any failure, invalid localization, lost helper, or pose/clock
+  freshness loss beyond one wall second. Contact monitoring, direct steering,
+  and the helper's destination/response deadlines remain provided infrastructure.
+- Cancel and latch `failed` when planning inputs change. Execution never
+  automatically restarts after a failure or a completed mission; restart the
+  simulation and node for a new run.
+
+The node publishes lightweight `executing`/`completed` status changes during
+movement rather than rebuilding figures/roadmap messages at every waypoint.
+No-path never arms execution, even with `execute:=true`.
+
+**Ctrl+C cancels pending movement.** SIGINT/SIGTERM handling keeps ROS alive to
+process cancellation/late acceptance for up to five seconds before destroying the
+node. If cancellation cannot be confirmed, the program reports an error and exits
+unsuccessfully: stop/restart the simulation before continuing. Never treat an
+action result or `completed` status alone as a public-check pass.
+
+`execute` is startup-only/read-only. The ordinary command without this parameter
+continues to plan and save figures without moving the robot.
 
 ### Test the student package
 
@@ -534,7 +608,49 @@ It reported:
 PASS: blocked; no path reported, no movement; stopped 2 simulated seconds; contact stream clear
 ```
 
-Solvable-room arrival checks remain Phase 7; planning success is not claimed as
-executed navigation. Live checks used domain 86 and separate
+At the end of Phase 6, solvable-room arrival was still untested; Phase 7 below
+adds execution evidence. Live checks used domain 86 and separate
 `hw02_phase6_20261120_LAYOUT` partitions. All agent-started validation processes
 were stopped afterward. Logs are ignored under `build/hw02/phase6/`.
+
+## Phase 7 verification results
+
+Verified on 2026-11-20. Eight focused execution cases were added; **85 total
+student tests pass**, with no errors, failures, or skips. They cover one active
+goal, all-success completion, helper failure, cancel-before-reply, wrong start,
+readiness timeout, stale pose, stalled clock, and measured-arrival enforcement.
+Existing tests verify that default mode creates no motion client.
+
+Fresh worlds, seed 0, and a public observer started before each implementation:
+
+| Layout | Commands | Final position (m) | Goal error (m) | Observer |
+| --- | --- | --- | --- | --- |
+| `wide` | 19 | (6.981077, 2.997701) | 0.019063 | PASS: stopped 2 simulated seconds, no contact |
+| `mixed` | 21 | (6.981674, 2.994667) | 0.019086 | PASS: stopped 2 simulated seconds, no contact |
+| `blocked` | 0 | (1.000000, 3.000000) | n/a | PASS: no path, no movement, stopped 2 simulated seconds |
+
+Both solvable runs published `planning`, `path_found`, `executing`, `completed`.
+Blocked published only `planning` and `no_path_found`. Independent monitoring
+continued for three stopped simulated seconds after terminal verification.
+Harness elapsed times were approximately 87 s (`wide`), 100 s (`mixed`), and
+11 s (`blocked`), including planning, execution, observer hold, and extra stop
+verification; these are not algorithm planning times.
+
+Actual fault injections in separate fresh `wide` worlds:
+
+| Injection during waypoint 2 | Observed outcome |
+| --- | --- |
+| Ctrl+C/SIGINT to planner process group | Cancellation acknowledged, clean exit, stopped; no waypoint 3 |
+| Pause simulation, then resume after failure | Clock/feedback stale failure; stopped after resume, no automatic continuation |
+| Invalid goal update while moving | Pending goal canceled, stale plan cleared, failure latched despite later valid static messages |
+
+Every fault run remained stopped for at least three simulated seconds after
+feedback resumed, sent exactly two waypoint requests, never reported `completed`,
+and had no physical contact. No tracebacks or unconfirmed-cancellation errors
+occurred. Logs retain explicit failure reasons; there is no success fallback.
+
+Live completion checks used isolated domain 86; fault injection used domain 87
+and distinct `hw02_phase7_LAYOUT_SEED_MODE` Gazebo partitions. All agent-started
+validation processes were stopped afterward. Logs/trajectories are ignored under
+`build/hw02/phase7/`; the final six-run solvable seed matrix remains Phase 8.
+Known third-party lint warnings remain, with all checks passing.

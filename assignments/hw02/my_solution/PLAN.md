@@ -1,10 +1,10 @@
 # HW02 implementation plan
 
-Phases 1-6 are complete: planning, latched ROS outputs, and saved figures passed
-local tests and live verification. RViz startup/subscription passed; manual GUI
+Phases 1-7 are complete: planning, latched ROS outputs, figures, and opt-in
+waypoint execution passed local tests and live verification. RViz startup/subscription passed; manual GUI
 rendering remains unconfirmed, with an upstream first-map shader warning documented.
 See [commands and results](README.md).
-Route execution is not implemented. Implement and explain one phase
+The full execution seed matrix and final report remain Phase 8. Implement and explain one phase
 at a time, verify it, commit it, then pause for review.
 
 ## Scope and isolation
@@ -160,6 +160,10 @@ visually checked. The public blocked observer passes; all layouts stay stationar
 figures match Gazebo coordinates, and planning alone still sends no movement.
 
 ### Phase 7 - Execute waypoints safely
+
+Completed on 2026-11-20: 85 tests pass. Public seed-0 observers pass for wide,
+mixed, and blocked; actual interrupt, stalled-clock and invalid-input injections
+stop safely without a next waypoint. Movement requires `execute:=true`.
 
 - Use the provided `RobotClient`; keep spinning while awaiting each result.
 - Start only after a complete route is validated and the movement helper is ready.

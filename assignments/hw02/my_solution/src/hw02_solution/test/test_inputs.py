@@ -82,7 +82,8 @@ def test_late_subscriber_receives_all_inputs_without_motion(rig):
     node, publishers, executor = rig
     assert node.ready
     assert node.get_parameter('use_sim_time').value is True
-    for name in ('seed', 'samples', 'neighbors', 'max_draws', 'figure_path'):
+    assert node.get_parameter('execute').value is False and node.motion is None
+    for name in ('seed', 'samples', 'neighbors', 'max_draws', 'figure_path', 'execute'):
         descriptor = node.describe_parameter(name)
         assert descriptor.name == name and descriptor.read_only
     assert node.grid is not None
