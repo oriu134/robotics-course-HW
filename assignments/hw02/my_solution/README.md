@@ -3,8 +3,8 @@
 This directory contains two setup examples and our `hw02_solution` package. Complete the
 [installation guide](../environment/README.md) before implementing your planner.
 
-Phases 1-4 are verified. Our node validates inputs, builds configuration space,
-and constructs a PRM graph. A* and movement are not implemented yet. See the
+Phases 1-5 are verified. Our node validates inputs, builds configuration space
+and a PRM, then finds and validates a complete A* route. Movement is not implemented yet. See the
 [implementation plan](PLAN.md) for the next phases and review checkpoints.
 
 ## Build and check the environment
@@ -60,7 +60,7 @@ Use the same domain and partition in every HW02 terminal; choose different unuse
 values if these are already taken. `gui:=false` runs headless; omit it to request
 the Gazebo GUI. Interactive GUI/RViz was not part of this verification.
 
-## Build and run our roadmap node (Phases 2-4)
+## Build and run our planning-only node (Phases 2-5)
 
 In terminal B, from the repository root, build the student package:
 
@@ -87,6 +87,8 @@ with map metadata, target coordinates, and `(row, column)` cells, ending with
 `No motion.` The node first logs `Configuration space ready: radius=0.30 m;`
 and the number of free cells, then logs `Roadmap built:` with graph statistics.
 For default seed 0 in `wide`, expect `2002 nodes, 33374 edges`.
+This is followed by `Path found: 19 waypoints; length=6.020 m;` and `No motion.`
+In `blocked`, expect `No roadmap path found in this bounded graph. No motion.`
 Press Ctrl+C to stop the node.
 
 The small [grid module](src/hw02_solution/hw02_solution/grid.py) handles metadata
@@ -134,7 +136,7 @@ topics is planned for Phase 6; currently C-space is stored internally.
 
 The [roadmap module](src/hw02_solution/hw02_solution/roadmap.py) builds a collection
 of safe positions and safe straight connections. **This is a graph, not a selected
-route or an image.** A* will search this graph in Phase 5.
+route or an image.** A* searches this graph in Phase 5, described below.
 
 The received start and goal are vertices 0 and 1. The builder draws uniform random
 positions in map bounds, rejects collisions/duplicates, then considers nearby
@@ -171,7 +173,37 @@ The same seed, map, targets, and settings reproduce the same graph.
 The [node](src/hw02_solution/hw02_solution/planner_inputs.py) keeps it in memory
 as positions and weighted neighbor lists; visualization publication remains Phase 6.
 **`Roadmap built` does not mean `path found`:** the blocked room also has a graph,
-but start and goal are in separate components. No path search or movement occurs yet.
+but start and goal are in separate components. A* now checks for a complete route
+after graph construction; movement remains disabled.
+
+### A* and complete routes (Phase 5)
+
+The [search module](src/hw02_solution/hw02_solution/search.py) chooses a shortest
+complete chain of roadmap edges from start to goal. It implements A* itself using
+Python's heap queue: priority is travelled edge cost plus straight-line distance
+to the goal. Costs are the recorded Euclidean edge lengths.
+
+This is the shortest route **within the sampled roadmap**, not a claim of the
+globally shortest continuous path through the room. No library planner is used.
+Malformed graphs, invalid vertex indices, nonfinite positions/distances, and
+non-Euclidean edge costs are explicit errors.
+
+After reconstruction, the planner checks start/goal, every returned vertex, every
+actual graph connection, and every full segment against configuration space.
+It returns an immutable `Route` containing ordered positions and length in metres.
+Coincident endpoints support a zero-length route. Disconnected graphs return
+`None`, never a successful partial route.
+
+The node stores the selected route internally and logs waypoint count/length.
+An unreachable goal produces one explicit bounded-roadmap no-path warning; invalid
+inputs or failed route validation are logged as errors instead. Neither case
+reuses an older route. Unchanged inputs retain the result without repeating search,
+including no-path results; changed/invalid inputs clear graph and route together.
+
+The route is data, not an image or a movement command. ROS path/status publication
+and saved figures remain Phase 6. The node stays alive and stationary after
+no-path, but the public observer's no-path status-topic check is not implemented
+until that publication phase.
 
 ### Test the student package
 
@@ -348,3 +380,49 @@ Pylance syntax checks and constructor-call compatibility checks passed. The exis
 third-party lint warnings remain, with all tests passing. Live validation used
 domain 86 and partition `hw02_phase4_20261120`; all owned processes stopped afterward.
 Audit, tuning, and runtime logs are ignored under `build/hw02/phase4/`.
+
+## Phase 5 verification results
+
+Verified on 2026-11-20. Five focused tests were added: four search/route tests
+and one ROS no-path/validation-error cache regression. **73 total student tests
+pass**, with zero errors, failures, or skips.
+
+Small known graphs cover shortest-path versus greedy direction, disconnected and
+coincident endpoints, invalid indices/weights, complete route reconstruction, and
+rejection of colliding or fabricated connections. Existing ROS input tests also
+check that cached paths survive unchanged input and are cleared on invalid input.
+
+Every layout/seed result matches an independent Dijkstra shortest-path oracle.
+The oracle is used only for verification; application code implements its own A*.
+Returned routes were checked against actual graph adjacency, full C-space segment
+checks, and independent continuous distances from physical walls/pillars.
+
+| Layout | Seed | Result | Waypoints | Length (m) | Search/validation (s) |
+| --- | --- | --- | --- | --- | --- |
+| `wide` | 0 | Path found | 19 | 6.019696 | 0.0193 |
+| `wide` | 1 | Path found | 20 | 6.018796 | 0.0181 |
+| `wide` | 2 | Path found | 19 | 6.022393 | 0.0191 |
+| `mixed` | 0 | Path found | 21 | 6.692012 | 0.0209 |
+| `mixed` | 1 | Path found | 20 | 6.681439 | 0.0250 |
+| `mixed` | 2 | Path found | 21 | 6.690267 | 0.0211 |
+| `blocked` | 0 | No path | 0 | n/a | 0.0263 |
+| `blocked` | 1 | No path | 0 | n/a | 0.0238 |
+| `blocked` | 2 | No path | 0 | n/a | 0.0233 |
+
+Repeated search on the same graph produced the same route. All selected route
+segments in this audit maintained at least 0.3265 m physical clearance, exceeding
+the required 0.30 m radius. No path length or partial route is fabricated for
+disconnected graphs, and finite roadmap failure is not proof of physical impossibility.
+
+Installed-node live checks used a fresh headless world for each layout with seed 0:
+`wide` logged 19 waypoints/6.020 m, `mixed` logged 21 waypoints/6.692 m, and `blocked`
+logged no path. Each result was computed only once despite repeated map/target
+messages. The node stayed alive for at least three simulated seconds afterward,
+with zero displacement/velocity to nine decimal places, fresh independent physics
+data, no contact, and no movement interfaces.
+
+Pylance syntax, documented Bash syntax, local links, and whitespace checks pass.
+The same third-party Flake8 fork warnings remain, with all tests passing.
+Live checks used domain 86 and separate `hw02_phase5_20261120_LAYOUT` partitions;
+all owned processes stopped afterward. Logs are ignored under `build/hw02/phase5/`.
+These are planning-only results, not executed navigation or public reach-check passes.

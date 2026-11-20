@@ -87,12 +87,18 @@ def test_late_subscriber_receives_all_inputs_without_motion(rig):
     assert node.targets == {'start': (1.75, -1.25), 'goal': (2.25, -1.25)}
     assert node.cspace is not None
     assert node.roadmap is not None
+    assert node.path is not None
+    assert node.path.points[0] == node.targets['start']
+    assert node.path.points[-1] == node.targets['goal']
+    assert node.path.length > 0
     assert node.roadmap.points[:2] == (node.targets['start'], node.targets['goal'])
     previous = node.roadmap
+    previous_path = node.path
     publishers['map'].publish(map_message())
     for _ in range(5):
         executor.spin_once(timeout_sec=0.05)
     assert node.roadmap is previous
+    assert node.path is previous_path
     for subscription in node.subscriptions:
         if subscription.topic_name in ('/map', '/hw02/start', '/hw02/goal'):
             assert subscription.qos_profile.reliability == ReliabilityPolicy.RELIABLE
@@ -109,6 +115,7 @@ def test_invalid_map_is_logged_and_clears_previous_input(rig, capfd):
     assert not node.ready
     assert node.cspace is None
     assert node.roadmap is None
+    assert node.path is None
     captured = capfd.readouterr()
     assert 'Rejected map' in captured.out + captured.err
     publishers['map'].publish(map_message())
@@ -129,6 +136,7 @@ def test_invalid_goal_is_logged_and_never_reuses_previous_goal(rig, capfd, inval
     spin_until(executor, lambda: 'goal' not in node.targets)
     assert not node.ready
     assert node.roadmap is None
+    assert node.path is None
     captured = capfd.readouterr()
     assert 'Rejected goal' in captured.out + captured.err
     publishers['goal'].publish(target(2.25, -1.25))
@@ -144,6 +152,7 @@ def test_new_map_rechecks_target_bounds(rig, capfd):
     spin_until(executor, lambda: node.grid is not None and node.grid.width == 2)
     assert not node.ready
     assert node.roadmap is None
+    assert node.path is None
     captured = capfd.readouterr()
     assert 'outside the map' in captured.out + captured.err
 
@@ -171,6 +180,7 @@ def test_target_in_inflated_wall_margin_is_rejected(rig, capfd):
     publishers['goal'].publish(target(1.25, -1.25))
     spin_until(executor, lambda: not node.ready)
     assert node.roadmap is None
+    assert node.path is None
     captured = capfd.readouterr()
     assert 'goal touches a configuration-space obstacle' in captured.out + captured.err
 
@@ -184,6 +194,7 @@ def test_changed_obstacles_rebuild_configuration_space(rig, capfd):
     spin_until(executor, lambda: node.cspace != previous)
     assert not node.ready
     assert node.roadmap is None
+    assert node.path is None
     captured = capfd.readouterr()
     assert 'touches a configuration-space obstacle' in captured.out + captured.err
 
@@ -202,3 +213,25 @@ def test_roadmap_failure_is_logged_once_without_reusing_old_graph(rig, monkeypat
         executor.spin_once(timeout_sec=0.05)
     assert builder.call_count == 1
     assert node.roadmap is None
+    assert node.path is None
+
+
+def test_no_path_and_validation_errors_never_keep_an_old_route(rig, monkeypatch, capfd):
+    node, publishers, executor = rig
+    planner = Mock(return_value=None)
+    monkeypatch.setattr(inputs_module.search, 'plan_route', planner)
+    publishers['goal'].publish(target(2.3, -1.2))
+    spin_until(executor, lambda: node.path is None)
+    assert node.roadmap is not None and planner.call_count == 1
+    captured = capfd.readouterr()
+    assert 'No roadmap path found' in captured.out + captured.err
+    publishers['map'].publish(map_message())
+    for _ in range(5):
+        executor.spin_once(timeout_sec=0.05)
+    assert planner.call_count == 1 and node.path is None
+    planner.side_effect = ValueError('Unsafe route')
+    publishers['goal'].publish(target(2.2, -1.3))
+    spin_until(executor, lambda: planner.call_count == 2)
+    assert node.path is None
+    captured = capfd.readouterr()
+    assert 'Route planning failed: Unsafe route' in captured.out + captured.err

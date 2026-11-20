@@ -1,4 +1,4 @@
-"""Validate inputs and build a PRM, without route search or robot movement."""
+"""Plan a complete PRM/A* route without commanding robot movement."""
 
 import math
 import time
@@ -13,6 +13,7 @@ from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 from . import roadmap as prm
+from . import search
 from .cspace import inflate, PLANNING_RADIUS, point_is_free
 from .grid import GridMap
 
@@ -52,7 +53,7 @@ def read_target(message: PoseStamped) -> tuple[float, float]:
 
 
 class PlannerInputs(Node):
-    """Build one roadmap for each valid changed input set, without movement."""
+    """Plan once per valid changed input set, without requesting movement."""
 
     def __init__(self, parameter_overrides: list[Parameter] | None = None) -> None:
         super().__init__('planner_inputs', parameter_overrides=parameter_overrides)
@@ -68,6 +69,7 @@ class PlannerInputs(Node):
         self.grid: GridMap | None = None
         self.cspace: GridMap | None = None
         self.roadmap: prm.Roadmap | None = None
+        self.path: search.Route | None = None
         self.targets: dict[str, tuple[float, float]] = {}
         self.ready = False
         self.create_subscription(OccupancyGrid, '/map', self.on_map, INPUT_QOS)
@@ -76,6 +78,11 @@ class PlannerInputs(Node):
                 PoseStamped, f'/hw02/{label}',
                 lambda message, name=label: self.on_target(name, message), INPUT_QOS)
         self.get_logger().info('Waiting for map, start and goal; no motion is enabled.')
+
+    def clear_plan(self) -> None:
+        """Discard the roadmap and selected route together."""
+        self.roadmap = None
+        self.path = None
 
     def on_map(self, message: OccupancyGrid) -> None:
         """Clear an invalid map rather than retaining a previously accepted map."""
@@ -86,12 +93,12 @@ class PlannerInputs(Node):
         except ValueError as error:
             self.ready = False
             self.cspace = None
-            self.roadmap = None
+            self.clear_plan()
             self.get_logger().error(f'Rejected map: {error}')
             return
         if self.grid != previous or self.cspace is None:
             self.ready = False
-            self.roadmap = None
+            self.clear_plan()
             self.cspace = inflate(self.grid)
             self.get_logger().info(
                 f'Configuration space ready: radius={PLANNING_RADIUS:.2f} m; '
@@ -105,12 +112,12 @@ class PlannerInputs(Node):
             self.targets[label] = read_target(message)
         except ValueError as error:
             self.ready = False
-            self.roadmap = None
+            self.clear_plan()
             self.get_logger().error(f'Rejected {label}: {error}')
             return
         if self.targets[label] != previous:
             self.ready = False
-            self.roadmap = None
+            self.clear_plan()
         self.check_ready()
 
     def check_ready(self) -> None:
@@ -118,7 +125,7 @@ class PlannerInputs(Node):
         was_ready = self.ready
         self.ready = False
         if self.cspace is None or any(name not in self.targets for name in ('start', 'goal')):
-            self.roadmap = None
+            self.clear_plan()
             return
         try:
             cells = {name: self.cspace.world_to_grid(*xy) for name, xy in self.targets.items()}
@@ -126,7 +133,7 @@ class PlannerInputs(Node):
                 if not point_is_free(self.cspace, xy):
                     raise ValueError(f'{name} touches a configuration-space obstacle')
         except ValueError as error:
-            self.roadmap = None
+            self.clear_plan()
             self.get_logger().error(f'Inputs not ready: {error}')
             return
         self.ready = True
@@ -148,11 +155,25 @@ class PlannerInputs(Node):
                 f'Roadmap built: seed={self.prm_settings["seed"]}; '
                 f'{len(self.roadmap.points)} nodes, {self.roadmap.edge_count} edges; '
                 f'{self.roadmap.draws} draws, {self.roadmap.candidate_edges} candidate edges; '
-                f'{time.perf_counter() - started:.3f} s. No route search or motion.')
+                f'{time.perf_counter() - started:.3f} s. No motion.')
+            started = time.perf_counter()
+            try:
+                self.path = search.plan_route(self.cspace, self.roadmap)
+            except ValueError as error:
+                self.get_logger().error(f'Route planning failed: {error}')
+                return
+            if self.path is None:
+                self.get_logger().warning(
+                    'No roadmap path found in this bounded graph. No motion.')
+            else:
+                self.get_logger().info(
+                    f'Path found: {len(self.path.points)} waypoints; '
+                    f'length={self.path.length:.3f} m; search/validation='
+                    f'{time.perf_counter() - started:.3f} s. No motion.')
 
 
 def main(args: list[str] | None = None) -> None:
-    """Spin the roadmap-building node until interrupted."""
+    """Spin the planning-only node until interrupted."""
     rclpy.init(args=args)
     node = PlannerInputs()
     try:

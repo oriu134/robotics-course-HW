@@ -1,9 +1,9 @@
 # HW02 implementation plan
 
-Phases 1-4 are complete: setup, input validation, configuration space, collision
-checks, and PRM construction passed local tests and headless verification.
+Phases 1-5 are complete: setup, input validation, configuration space, collision
+checks, PRM construction, and A* routes passed local tests and headless verification.
 See [commands and results](README.md).
-A* and route execution are not implemented. Implement and explain one phase
+Visualization publication and route execution are not implemented. Implement and explain one phase
 at a time, verify it, commit it, then pause for review.
 
 ## Scope and isolation
@@ -125,6 +125,10 @@ candidates, 20000 maximum draws, one attempt per changed valid input set.
 passes validation; disconnected start/goal cases terminate without movement.
 
 ### Phase 5 - A* and complete route validation
+
+Completed on 2026-11-20: 73 total tests pass. All nine route/no-path results
+match independent shortest-path and safety checks. Live seed 0 in every layout
+finds a complete route or reports no path, caches the result, and stays stationary.
 
 - Implement A* over the roadmap using Euclidean edge cost and heuristic.
 - Reconstruct an ordered start-to-goal route and compute its length.
